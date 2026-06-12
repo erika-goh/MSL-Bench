@@ -19,7 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mkb import problems as P
 from mkb.compile import compile_metal
 from mkb.execute import run_kernel
-from mkb.timing import check_calibration, record_calibration, summarize, time_reference_mps
+from mkb.timing import (
+    check_calibration,
+    check_stability,
+    record_calibration,
+    summarize,
+    time_reference_mps,
+)
 from mkb.verify import verify
 
 
@@ -43,12 +49,17 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
 
     inputs = P.make_inputs(problem)
 
-    exec_res = run_kernel(
+    # A/B/A timing: candidate (block 1) → reference (block 2) → candidate (block 3).
+    # Block 1 also produces the outputs we verify against the reference; block 3
+    # is timing-only. If candidate medians from blocks 1 and 3 disagree, the
+    # machine state shifted across the reference block in between and the
+    # speedup ratio is untrustworthy.
+    exec_1 = run_kernel(
         comp.metallib, problem["entry_point"], comp.grid, comp.threadgroup,
         inputs, problem["outputs"],
     )
-    if not exec_res.ok:
-        result["error"] = exec_res.error
+    if not exec_1.ok:
+        result["error"] = exec_1.error
         return result
 
     import torch  # lazy: only needed once execution succeeds
@@ -56,13 +67,44 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
     ref_out = reference(**t_inputs)
     ref_outputs = {problem["outputs"][0]["name"]: ref_out.numpy()}
 
-    v = verify(exec_res.outputs, ref_outputs, **problem["tolerance"])
+    v = verify(exec_1.outputs, ref_outputs, **problem["tolerance"])
     result["correct"] = v.correct
     result["max_abs_err"] = v.max_abs_err
     result["verify_detail"] = v.detail
 
-    cand_t = summarize(exec_res.gpu_times_ms)
+    if not v.correct:
+        # Wrong-answer kernels: timing is meaningless, skip blocks 2 and 3.
+        result["speedup"] = None
+        result["timing_trustworthy"] = None
+        return result
+
     ref_t = time_reference_mps(reference, inputs)
+
+    exec_3 = run_kernel(
+        comp.metallib, problem["entry_point"], comp.grid, comp.threadgroup,
+        inputs, problem["outputs"],
+    )
+    if not exec_3.ok:
+        result["error"] = exec_3.error
+        return result
+
+    cand_t_1 = summarize(exec_1.gpu_times_ms)
+    cand_t_3 = summarize(exec_3.gpu_times_ms)
+    stab = check_stability(cand_t_1, cand_t_3)
+    result["block1_median_ms"] = round(cand_t_1.median_ms, 4)
+    result["block3_median_ms"] = round(cand_t_3.median_ms, 4)
+    result["block_delta_frac"] = round(stab.delta_frac, 4)
+    result["timing_trustworthy"] = stab.stable
+
+    if not stab.stable:
+        result["stability_error"] = stab.message
+        result["speedup"] = None
+        if calibrate:
+            result["calibration"] = "refused: " + stab.message
+        return result
+
+    # A/B/A passed → combine 20 candidate samples for a tighter kernel_ms estimate.
+    cand_t = summarize(exec_1.gpu_times_ms + exec_3.gpu_times_ms)
     result["kernel_ms"] = round(cand_t.median_ms, 4)
     result["reference_ms"] = round(ref_t.median_ms, 4)
     result["speedup"] = round(ref_t.median_ms / cand_t.median_ms, 3) if cand_t.median_ms > 0 else None
