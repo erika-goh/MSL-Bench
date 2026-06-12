@@ -1,0 +1,16 @@
+[project]
+name = "mkb"
+version = "0.1.0"
+description = "Metal KernelBench — a benchmark for LLM-generated Metal compute kernels on Apple Silicon"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+bench = ["torch>=2.2"]          # MPS reference implementations + timing
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+packages = ["mkb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
