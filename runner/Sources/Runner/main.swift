@@ -19,7 +19,9 @@ struct Manifest: Codable {
     let grid: [Int]        // total threads, [x, y, z]
     let threadgroup: [Int] // threads per threadgroup, [x, y, z]
     let buffers: [BufferSpec]
-    let warmup: Int
+    let warmup_ms_min: Double
+    let warmup_ms_max: Double
+    let warmup_iter_max: Int
     let runs: Int
 }
 
@@ -103,9 +105,12 @@ func dispatchOnce() -> Double? {
     if cmd.status == .error { return nil }
     return (cmd.gpuEndTime - cmd.gpuStartTime) * 1000.0 // ms
 }
-
-for _ in 0..<m.warmup {
-    if dispatchOnce() == nil { fail("kernel execution failed during warmup (runtime GPU error)") }
+var cumulativeMs: Double = 0.0
+var iter: Int = 0
+while cumulativeMs < m.warmup_ms_min && cumulativeMs < m.warmup_ms_max && iter < m.warmup_iter_max {
+    guard let t = dispatchOnce() else { fail("kernel execution failed during warmup (runtime GPU error)") }
+    cumulativeMs += t
+    iter += 1
 }
 
 var times: [Double] = []

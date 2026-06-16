@@ -39,11 +39,10 @@ def evaluate_kernel(kernel_src: str, problem: dict, reference) -> tuple[bool, st
     comp = compile_metal(src, work)
     if not comp.ok:
         return False, f"COMPILE ERROR:\n{comp.diagnostics}", {"stage": "compile"}
-    if comp.grid is None or comp.threadgroup is None:
-        return False, "Missing required // MKB_GRID and // MKB_TG comments.", {"stage": "launch_config"}
 
+    grid, threadgroup = P.launch_config(problem)
     inputs = P.make_inputs(problem)
-    res = run_kernel(comp.metallib, problem["entry_point"], comp.grid, comp.threadgroup,
+    res = run_kernel(comp.metallib, problem["entry_point"], grid, threadgroup,
                      inputs, problem["outputs"])
     if not res.ok:
         return False, f"RUNTIME ERROR: {res.error}", {"stage": "runtime"}

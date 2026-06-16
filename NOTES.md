@@ -5,6 +5,185 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-15 — Phase 2: decoupling N from kernel files, decoupling warmup from iteration count
+
+Shipped three pieces that closed Phase 1's two named open items and unblocked
+Tier 1 sizing: (1) launch config (grid + threadgroup) migrated out of `.metal`
+files into `mkb/problems.launch_config()` with sensible defaults derived from
+the output shape, (2) Tier 1 problem size bumped from N=2^20 (1M) to N=2^25
+(32M) so MPS reference times comfortably exceed 1 ms, (3) warmup replaced from
+count-based ("3 iterations") to time-based ("dispatch until cumulative GPU
+time ≥ 50 ms") on both the Swift runner and Python `time_reference_mps`.
+
+p001 and p002 calibration baselines re-recorded at the new N. A/B/A
+`block_delta_frac` dropped from 8.7% / 14.8% (failing the 7% gate) to 0.2%
+/ 3.4% (comfortably passing). Speedup numbers collapsed from Phase 1's
+fictional 7.3× to an honest 1.1–1.2× — the bandwidth-bound elementwise
+kernels modestly beat MPSGraph but no longer hide behind dispatch overhead.
+
+### Lesson: a coupling stays invisible until the shared variable moves
+
+The `MKB_GRID`/`MKB_TG` magic comments in golden kernels encoded N (the
+problem size) inside the kernel file. This worked fine — nothing ever
+changed N. The moment Phase 2 tried to bump N from 1M to 32M, the coupling
+produced a silent-wrong-answer bug: change spec.py to N=32M, forget the
+kernel comment, and the dispatch is 1M threads against a 32M buffer —
+only the first 1M elements get written. Verify catches the difference,
+but only by luck; if the test had checked compile + dispatch without
+result comparison, it would have looked superficially fine.
+
+The fix was structural, not editorial: instead of "remember to update both
+files," move N's ownership entirely to spec.py and derive grid in the
+harness via `launch_config()`. Goldens become pure algorithm with no
+N-specific data — the CLAUDE.md "never modify golden_kernels" rule got
+stronger as a side effect, because there's now nothing in those files to
+drift in the first place.
+
+**Principle:** couplings between files reveal themselves only when one of
+the shared values changes. When you find one, the question to ask is "who
+*owns* this value?" The owner stores it; everyone else derives or receives
+it. Don't fix coupling bugs with discipline ("just remember to update
+both"); fix them by removing the duplicate ownership.
+
+### Lesson: measure the property you want, not a proxy for it
+
+Phase 1 ended with two named open items. Both were the same shape:
+
+- (1) Time-based warmup, because "3 iterations" was a proxy for "GPU
+  clocks are awake" — and the proxy fails when iteration time changes.
+- (2) Reference ≥1 ms, because the existing N was a proxy for "reference
+  is GPU-bound" — and the proxy fails when MPS dispatch overhead
+  dominates small kernels.
+
+Open item (1) was non-blocking on day-of-Phase-1 because the kernel size
+hadn't moved. The instant Phase 2 moved N to 32M, the warmup proxy broke
+catastrophically (block 3 ran 14.8% *faster* than block 1 — clock
+ramping, not thermal degradation). Filed → fixed in the same session.
+
+The principle that solves both: **stop coding the proxy, code the
+property.** "Until cumulative GPU time ≥ 50 ms" measures the actual ramp
+condition; it self-adjusts to any kernel size from 50 µs to 100 ms per
+dispatch with the same code. "Reference is sized so it takes ≥1 ms"
+measures the actual overhead-vs-work tradeoff; it adapts as MPS
+orchestration costs change. Proxies make the failure invisible until the
+underlying variable shifts; property-based measurements stay correct
+across changes.
+
+### Lesson: honest speedups need GPU-work-dominated reference times
+
+At N=1M, MPS reference was ~0.5 ms — but ~0.3 ms of that was Python+MPS
+orchestration overhead and only ~0.2 ms was GPU work. A hand-written
+kernel running on a dedicated Swift runner trivially "wins" by 7× because
+it skips the orchestration cost — not because it does the math better.
+Useless signal: every kernel an LLM ever writes would look "much faster
+than MPS" on tiny problems.
+
+At N=32M, MPS reference is ~2.4 ms. Of that, ~0.2 ms is overhead
+(unchanged) and ~2.2 ms is GPU work (30× more). Overhead drops from ~60%
+of the measurement to ~8%. The speedup ratio now compares candidate-GPU
+vs MPSGraph-GPU and means something. The 1.1–1.2× numbers are the real
+signal: we're competing on equal terms with MPSGraph on memory-bound ops
+and modestly winning.
+
+**Carry forward to Tier 2/3 authoring:** every spec must be sized so its
+reference takes ≥1 ms. This is *not* a global N — for reductions the
+right size will differ from elementwise, for tiled matmul different
+again. The rule is "reference ≥1 ms," not "shape ≥ X."
+
+### Concept: GPU clock ramping, revisited with the fix
+
+Phase 1 explained the symptom (Apple Silicon GPUs idle at low clock,
+take 10–100 ms of sustained load to ramp up). Phase 2 fixed the
+consequence: warmup must be measured in *GPU time*, not iteration count,
+because the only thing that wakes the clocks is sustained load — and
+"sustained" is a time threshold, not a count threshold. Three iterations
+of a 50 µs kernel buys 150 µs of load (nowhere near ramp); three of a
+10 ms kernel buys 30 ms (close but not enough); three of a 100 ms kernel
+buys 300 ms (overkill). The same constant ("3") gives wildly different
+warmup quality at different kernel scales. Time-based warmup gives the
+*same* quality (≥50 ms of GPU work, by construction) at every scale.
+
+### Concept: two timers, kept where they belong
+
+The candidate side uses GPU hardware timestamps (`cmd.gpuStartTime` /
+`cmd.gpuEndTime`) inside Swift — pure GPU execution time, no
+orchestration noise. The reference side uses CPU wall-clock
+(`time.perf_counter()` brackets around `reference_fn(...)` with explicit
+`torch.mps.synchronize()` barriers) — wall-clock measurement, includes
+PyTorch+MPS orchestration *and* GPU work.
+
+Asymmetric on purpose: we use the best available timer for each side.
+We can't get per-op GPU timestamps from PyTorch's MPS backend (black
+box), so reference is wall-clock by necessity. We could move candidate
+to wall-clock too, but it would re-introduce ~100s of µs of Swift/IPC
+overhead per dispatch — the very thing the runner was built to exclude.
+
+The N=32M fix doesn't unify the timers; it sizes the problem so GPU
+work dominates wall-clock on the reference side (~93% of the
+measurement), making the two timers measure things that are *close
+enough to* apples-to-apples that the ratio means kernel quality.
+
+### Decisions made
+
+- **Tier 1 global N = 2^25 (33,554,432).** Chosen by measuring relu (the
+  lightest Tier 1 op) at N ∈ {1M, 2M, 4M, 8M, 16M} on MPS and seeing relu
+  cross 1 ms only at 16M with no margin. 32M extrapolates to ~2 ms —
+  comfortable margin, well within M2 Pro unified memory (3 × 128 MB
+  buffers per vector_add invocation).
+- **Launch override in spec is partial-allowed** — spec can declare just
+  `grid`, just `threadgroup`, or both. Either omitted field uses the
+  default. Simpler than all-or-nothing and matches the common case of
+  Tier 2 problems that override grid geometry but keep TG=256.
+- **Default threadgroup = (256, 1, 1)** for 1D dispatch. Apple's
+  hardware-optimal sub-multiples are 32 (one SIMD group) and multiples
+  thereof; 256 is the standard "fits any Apple GPU since A12" choice.
+- **Three warmup exit conditions, AND-joined.** Floor (50 ms) is the
+  goal; ceiling (500 ms) caps wall-clock cost during sweeps; iter cap
+  (10,000) prevents infinite loop on a kernel whose GPU timer returns 0.
+  Floor fires under normal operation; the other two are guardrails.
+- **LLM prompt updated to not declare MKB_GRID.** Convention #4 in
+  `mkb/llm/generate.py` now says "launch config is owned by the harness,
+  do NOT declare it in the kernel file." Phase 3 prompt will need to
+  surface the spec's launch override to the model for Tier 2+ problems
+  (currently doesn't — known gap, see open items).
+- **Swift warmup loop was a user-authored learning slice.** Python
+  mirror was plumbing (Claude wrote it). Splitting that way kept the
+  learning content in the conceptually-interesting language and avoided
+  re-doing the same loop in two places — the Swift work taught the
+  pattern; the Python mirror just applied it.
+
+### Open items (carry into next session)
+
+- **`build_prompt` does not surface launch override to the model.** For
+  Tier 1 (default launch), the model can infer grid from the output
+  shape stated in the prompt. For Tier 2+ where spec overrides launch
+  (e.g., `p101_row_sum` with `grid=(B,1,1) tg=(K,1,1)`), the model
+  needs to know that geometry to write correct index math. Required
+  before any LLM sweep over Tier 2.
+- **Tier 1 problems p003–p008 not yet authored.** Six elementwise
+  problems on the punch list (elementwise_mul, scalar_mul, leaky_relu,
+  saxpy, sigmoid, gelu) plus their golden kernels. Plumbing — ship in
+  one batch.
+- **`p101_row_sum` is the Tier 2 first reduction.** Hand-off planned:
+  Claude writes spec + scaffold with decision points marked, user
+  writes the kernel by hand as a learning slice.
+
+### Resolved this session (no longer open)
+
+- **Phase 1 open item (1) — time-based warmup.** Resolved.
+- **Phase 1 open item (2) — Tier 1 sizing for ≥1 ms reference.** Resolved.
+
+### Carried forward from earlier sessions
+
+- `tempfile.mkdtemp(prefix="mkb_build_")` in `scripts/run_problem.py:40`
+  still leaks. Per-problem, minor.
+- Correctness reference still on CPU torch (`run_problem.py`) — will
+  bite on reduction-order problems (Tier 2 territory).
+- `metal-kernelbench-plan.md` still missing from repo despite CLAUDE.md
+  reference.
+
+---
+
 ## 2026-06-12 — Phase 1 timing trust (calibration discipline + A/B/A)
 
 Shipped both sub-tasks: metadata-aware calibration baselines (so drift checks

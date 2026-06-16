@@ -38,7 +38,9 @@ def run_kernel(
     threadgroup: tuple[int, int, int],
     inputs: dict[str, np.ndarray],
     output_specs: list[dict],
-    warmup: int = 3,
+    warmup_ms_min: float = 50.0,
+    warmup_ms_max: float = 500.0,
+    warmup_iter_max: int = 10_000,
     runs: int = 10,
     runner_path: Path | None = None,
 ) -> ExecResult:
@@ -69,7 +71,9 @@ def run_kernel(
             "grid": list(grid),
             "threadgroup": list(threadgroup),
             "buffers": buffers,
-            "warmup": warmup,
+            "warmup_ms_min": warmup_ms_min,
+            "warmup_ms_max": warmup_ms_max,
+            "warmup_iter_max": warmup_iter_max,
             "runs": runs,
         }
         mpath = tdir / "manifest.json"

@@ -42,11 +42,8 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
     result["diagnostics"] = comp.diagnostics
     if not comp.ok:
         return result
-    if comp.grid is None or comp.threadgroup is None:
-        result["compiled"] = True
-        result["error"] = "missing MKB_GRID / MKB_TG launch-config comments"
-        return result
 
+    grid, threadgroup = P.launch_config(problem)
     inputs = P.make_inputs(problem)
 
     # A/B/A timing: candidate (block 1) → reference (block 2) → candidate (block 3).
@@ -55,7 +52,7 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
     # machine state shifted across the reference block in between and the
     # speedup ratio is untrustworthy.
     exec_1 = run_kernel(
-        comp.metallib, problem["entry_point"], comp.grid, comp.threadgroup,
+        comp.metallib, problem["entry_point"], grid, threadgroup,
         inputs, problem["outputs"],
     )
     if not exec_1.ok:
@@ -81,7 +78,7 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
     ref_t = time_reference_mps(reference, inputs)
 
     exec_3 = run_kernel(
-        comp.metallib, problem["entry_point"], comp.grid, comp.threadgroup,
+        comp.metallib, problem["entry_point"], grid, threadgroup,
         inputs, problem["outputs"],
     )
     if not exec_3.ok:

@@ -93,7 +93,14 @@ def summarize(samples_ms: list[float]) -> TimingStats:
     return TimingStats(med, iqr, med > 0 and (iqr / med) > NOISY_IQR_FRAC, samples_ms)
 
 
-def time_reference_mps(reference_fn, inputs: dict, warmup: int = 3, runs: int = 10) -> TimingStats:
+def time_reference_mps(
+    reference_fn,
+    inputs: dict,
+    warmup_ms_min: float = 50.0,
+    warmup_ms_max: float = 500.0,
+    warmup_iter_max: int = 10_000,
+    runs: int = 10,
+) -> TimingStats:
     """Time the PyTorch reference on the MPS backend (wall clock + synchronize).
 
     Imported lazily so the rest of mkb works without torch installed.
@@ -107,9 +114,17 @@ def time_reference_mps(reference_fn, inputs: dict, warmup: int = 3, runs: int = 
         if dev.type == "mps":
             torch.mps.synchronize()
 
-    for _ in range(warmup):
+    # Time-based warmup: mirror of the Swift runner's warmup loop — same three
+    # exit conditions, different timer source. Warmup samples are discarded.
+    cumulative_ms = 0.0
+    iter_count = 0
+    while cumulative_ms < warmup_ms_min and cumulative_ms < warmup_ms_max and iter_count < warmup_iter_max:
+        sync()
+        t0 = time.perf_counter()
         reference_fn(**t_inputs)
         sync()
+        cumulative_ms += (time.perf_counter() - t0) * 1000.0
+        iter_count += 1
 
     samples = []
     for _ in range(runs):
