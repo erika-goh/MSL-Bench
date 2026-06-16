@@ -4,10 +4,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mkb import timing as _timing
+from mkb.problems import launch_config
 from mkb.score import fast_p, tier_table
 from mkb.timing import (
     CALIBRATION_SCHEMA_VERSION,
@@ -18,7 +20,6 @@ from mkb.timing import (
     summarize,
 )
 from mkb.verify import verify
-from mkb.compile import parse_launch_config
 
 
 def test_verify_pass():
@@ -62,11 +63,55 @@ def test_fast_p():
     assert t[1]["n"] == 3 and t[2]["n"] == 1
 
 
-def test_parse_launch_config():
-    src = "// MKB_GRID: 1048576 1 1\n// MKB_TG: 256 1 1\nkernel void f(){}"
-    grid, tg = parse_launch_config(src)
-    assert grid == (1048576, 1, 1)
+# ---------- launch_config (spec-owned grid derivation) ----------
+
+def test_launch_config_default_derives_grid_from_output_shape():
+    p = {"id": "p_test", "outputs": [{"name": "out", "shape": (1 << 24,), "dtype": "float32"}]}
+    grid, tg = launch_config(p)
+    assert grid == (1 << 24, 1, 1)
     assert tg == (256, 1, 1)
+
+
+def test_launch_config_2d_output_flattens_to_1d_dispatch():
+    p = {"id": "p_test", "outputs": [{"name": "C", "shape": (1024, 1024), "dtype": "float32"}]}
+    grid, _ = launch_config(p)
+    assert grid == (1024 * 1024, 1, 1)
+
+
+def test_launch_config_override_grid_only_keeps_default_tg():
+    p = {"id": "p_test",
+         "outputs": [{"name": "out", "shape": (4096,), "dtype": "float32"}],
+         "launch": {"grid": (4096, 1, 1)}}
+    grid, tg = launch_config(p)
+    assert grid == (4096, 1, 1)
+    assert tg == (256, 1, 1)
+
+
+def test_launch_config_override_both():
+    p = {"id": "p_test",
+         "outputs": [{"name": "out", "shape": (4096,), "dtype": "float32"}],
+         "launch": {"grid": (64, 1, 1), "threadgroup": (128, 1, 1)}}
+    grid, tg = launch_config(p)
+    assert grid == (64, 1, 1)
+    assert tg == (128, 1, 1)
+
+
+def test_make_inputs_constant_init():
+    from mkb.problems import make_inputs
+    p = {"inputs": [{"name": "alpha", "shape": (1,), "dtype": "float32",
+                     "init": "constant", "value": 0.01}]}
+    out = make_inputs(p)
+    assert out["alpha"].shape == (1,)
+    assert out["alpha"].dtype == np.float32
+    assert out["alpha"][0] == np.float32(0.01)
+
+
+def test_launch_config_rejects_non_3_tuple():
+    p = {"id": "p_test",
+         "outputs": [{"name": "out", "shape": (16,), "dtype": "float32"}],
+         "launch": {"grid": (16, 1)}}  # 2-tuple, not 3
+    with pytest.raises(ValueError, match="3-tuples"):
+        launch_config(p)
 
 
 def test_summarize_flags_noisy():

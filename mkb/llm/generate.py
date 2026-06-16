@@ -16,10 +16,10 @@ CONVENTIONS = """Conventions (required):
 2. The kernel function must be named `{entry_point}`.
 3. Buffer bindings: inputs in the order listed get [[buffer(0)]] .. [[buffer(N-1)]]; \
 outputs follow, continuing the numbering.
-4. Declare the launch configuration with two magic comments anywhere in the file:
-   // MKB_GRID: X Y Z      (total threads dispatched)
-   // MKB_TG: X Y Z        (threads per threadgroup)
-   dispatchThreads is used, so the grid need not be a multiple of the threadgroup.
+4. Launch configuration (grid, threadgroup) is owned by the harness — do NOT \
+declare it inside the kernel file. Write the kernel for the grid stated in the \
+problem (the harness uses `dispatchThreads`, so grid need not be a multiple of \
+threadgroup).
 5. float32 unless stated otherwise. No host code — kernel file only."""
 
 TEMPLATE = """Write a Metal compute kernel for the following problem.
