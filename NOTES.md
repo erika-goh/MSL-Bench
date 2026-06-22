@@ -5,6 +5,143 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-22 — Tier 1 fill-out: p007–p012, and the first-run MPS-compilation gotcha
+
+Pushed Tier 1 from two confirmed problems (p001, p002) to ten confirmed
+problems (p001–p008, p010, p012). Skipped p009 GELU when MSL turned out to
+have no `erf` — deferred to a focused future session on polynomial erf as
+its own numerics task, rather than letting it derail this batch.
+
+### What got built
+
+| ID | Op | Steady speedup | Bucket |
+|---|---|---|---|
+| p007 | sigmoid | 1.13× | low (MPS fuses) |
+| p008 | tanh | 1.15× | low (MPS fuses) |
+| ~~p009~~ | ~~gelu~~ | deferred | — |
+| p010 | abs | 1.20× | low (MPS fuses, single ALU op) |
+| p011 | exp | 1.13× | low (MPS fuses) |
+| p012 | clamp | 1.16× | low (MPS fuses) |
+
+Also verified end-to-end p003–p006 which had specs from the prior commit
+but no calibration. All four are now sane: p003 1.10×, p004 1.15×, p005
+1.12×, p006 axpby 2.49× (the one big-speedup problem of the entire tier —
+real fusion win because torch eager dispatches `a*x + b*y` as three
+separate MPS kernels).
+
+### The headline finding: MPS lazily compiles MPSGraph shaders on the first
+### (op, shape) invocation, and our warmup loop doesn't amortize it.
+
+What I observed mid-session: re-running `p011_exp` in a fresh process gave
+**1.13× speedup, vs. 1.90× on the first run**. Same kernel, same reference,
+same shape, same machine — only difference was that the first run was the
+first time MPS had ever compiled `exp` at shape `(2^25,)` on this machine.
+Reproduced on sigmoid (1.33× → 1.13×) and clamp (1.86× → 1.16×). Did NOT
+reproduce on axpby (2.44× → 2.49×, so its big speedup is real fusion, not
+a compilation artifact).
+
+Diagnosis: MPS compiles graph shaders lazily, and the compilation cost is
+borne by the *first dispatch*, not amortized across the warmup loop. Even
+worse, the cache survives across processes (lives in
+`~/Library/Caches/com.apple.metal/...` at the OS level), so once a shape+op
+combo is compiled on a machine, **every subsequent benchmark run sees the
+fast path**. The first time you measure a new problem, you're measuring
+compile-time + run-time; every time after, you're measuring run-time only.
+
+Implications:
+- The committed speedup numbers for p007 (1.33×) and p011 (1.898×) are
+  inflated by this artifact. Steady-state values are both ~1.13×. Spec
+  descriptions and commit messages aren't being amended (per project
+  practice), but this log is the source of truth for the corrected numbers.
+- axpby's 2.49× is real and stays.
+- The benchmark's mental model is now simpler and cleaner than I thought:
+  **MPS has a fused single-op kernel for every standard elementwise op**.
+  Hand-written kernels only win by a small margin on those (dispatch
+  overhead). The big wins come from expression-level fusion across
+  primitives (axpby) — that's the interesting territory for an LLM.
+
+### Harness gap to address before Phase 3 / Tier 2
+
+The fix needs to be one of:
+1. Add a "prime" run before warmup — dispatch the reference once, discard
+   timing, then start the real warmup. Populates the OS cache cheaply.
+2. Make `--calibrate` only succeed if the result agrees with a re-run
+   within X% (forces the user to take a second measurement).
+3. Detect the situation post-hoc: if reference_ms differs from the
+   calibrated baseline by >30% in *the same direction every time*, warn
+   "did you re-run after spec change?"
+
+Option 1 is the cheapest and most general. Carrying as the first item on
+the Phase 3 todo.
+
+### The .item() trap
+
+Sub-finding from clamp: my first reference passed `min=lo.item(), max=hi.item()`
+inside the timing loop. `.item()` on an MPS-resident tensor forces a
+GPU→CPU sync per call, inflating reference_ms by ~0.4ms (28%) — pure
+measurement artifact. Fixed by following p005 leaky_relu's pattern: the
+lo/hi tensors are bound for the kernel as buffers, but the reference uses
+the same Python constants directly. Lesson: any `.item()`, `.tolist()`, or
+device→host transfer inside a reference function poisons the timing.
+Adding this to the LLM CONVENTIONS prompt should help future generated
+references avoid the same mistake.
+
+### Smaller observations
+
+- **Cold-start A/B/A failure.** First GPU dispatch of a session can trip
+  the 7% block1-vs-block3 threshold because the M2 Pro's clock hasn't
+  ramped. Workaround: discard the first run of any session. A real fix
+  would be a clock-stabilization gate in warmup.
+- **`timing_noisy` correlates with per-element compute, not absolute
+  kernel time.** sigmoid, tanh, exp (all transcendentals) tripped the 15%
+  IQR threshold; abs, clamp (no transcendental) did not, despite running
+  in the same ~1.4ms. Suggests transcendental table-lookup adds
+  shot-noise that flat ALU ops don't. The threshold might want to be
+  absolute, not percentage — open question.
+- **`max_abs_err` is misleading for ops with wide output ranges.** exp at
+  x≈5.7 has output ≈298, where 1 ULP ≈ 3.5e-5. The verify gate already
+  handles this via combined atol + rtol, but the headline number
+  (4.58e-5) looks scary without that context. Worth surfacing in the
+  result JSON: "max_ulp_err" alongside "max_abs_err".
+
+### Concept introduced this session: MSL math library is smaller than libm
+
+The Metal Shading Language ships a leaner math library than libm. Found
+out the hard way: `erf` and `erfc` are absent. `exp`, `log`, `tanh`,
+`sin`, `cos`, `pow`, and the usual suspects are present. There's also a
+`metal::fast::` namespace with ~2-3× faster variants of the transcendentals
+at lower accuracy (omitted for benchmark fairness — torch uses precise
+versions on MPS).
+
+The takeaway for spec design: when picking new elementwise problems,
+**check the MSL headers first** at `/private/var/run/com.apple.security.cryptexd/.../metal_math`
+(the path can be found via `find / -name 'metal_math' 2>/dev/null`) before
+committing to a formula. Saves a compile failure mid-stride.
+
+### Decisions made
+
+- p009 GELU deferred to a dedicated session. Either Abramowitz-Stegun
+  polynomial or full Chebyshev; the goal will be implementing a libm-grade
+  transcendental from scratch, not just adding GELU coverage.
+- p012 clamp constants: `lo = -1.0, hi = 1.0` (constant init, not uniform).
+  Reasoning: uniform init could produce `lo > hi` (degenerate) by chance;
+  constants ensure ~32% of randn x is actually clamped, so the operation
+  does meaningful work.
+- Calibration JSON (`results/calibration.json`) confirmed correctly
+  gitignored — it's per-machine timing state, not source. Don't try to
+  commit it again.
+
+### Open items for next session
+
+- Implement the "prime run" warmup primer (Harness gap above).
+- Re-measure p001–p012 in one batch with the primer in place to get a
+  clean steady-state speedup table — current numbers are partly inflated
+  by first-run compilation.
+- Consider whether to extend Tier 1 with silu/swish, softplus, log, sqrt,
+  rsqrt, or pivot to Tier 2 reductions.
+
+---
+
 ## 2026-06-15 — Phase 2: decoupling N from kernel files, decoupling warmup from iteration count
 
 Shipped three pieces that closed Phase 1's two named open items and unblocked
