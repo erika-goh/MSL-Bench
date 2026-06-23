@@ -5,6 +5,93 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-23 — p101 row_sum: first Tier 2 reduction, first MPS loss
+
+Opened Tier 2 with the canonical learning reduction: row-wise sum of a
+262144 × 256 float32 matrix, one threadgroup per row, K=256 threads
+cooperating via threadgroup-shared memory and a tree reduction.
+
+### What's new in this problem (concepts that didn't appear in Tier 1)
+
+- **Threadgroup-shared memory** — `threadgroup float scratch[K]` allocates
+  a per-group scratchpad visible to every thread in the group, much faster
+  than device memory, invisible to other groups. Tier 1 never needed it
+  because elementwise threads don't cooperate.
+- **Barriers** — `threadgroup_barrier(mem_flags::mem_threadgroup)` is the
+  synchronization point. Threads in a group don't run in lockstep (they're
+  scheduled in SIMD-groups of 32 on Apple GPUs), so without barriers a
+  later stage can read scratch slots before the earlier stage's writes
+  land. The `mem_threadgroup` flag scopes the visibility guarantee to
+  threadgroup memory, which is cheaper than `mem_device`.
+- **Tree reduction** — log₂(K)=8 halving-stride stages, active threads
+  halving each stage. The big "gotcha" is that the barrier MUST be
+  outside the `if (tid < stride)` guard — every thread in the group has
+  to hit every barrier, including the idle ones, or the behavior is
+  undefined.
+
+### Result
+
+| metric | value |
+|---|---|
+| compiled | true |
+| correct | true (max_abs_err 1.14e-5, atol 1e-4) |
+| kernel_ms | 3.01 |
+| reference_ms | 1.59 |
+| speedup | **0.527× — we lose to MPS** |
+| A/B/A delta | 0.25% (timing trustworthy) |
+| timing_noisy | true (IQR > 15%) |
+
+First problem in the entire project where the candidate kernel doesn't
+beat MPS. Every Tier 1 elementwise problem won (1.10×–2.49×) because
+MPS's per-dispatch overhead dominates trivial ops. Reductions flip that:
+there's real shared algorithmic work, so an MPS-optimized kernel that
+exploits SIMD-group primitives wins.
+
+### Why the gap exists (left unfixed on purpose)
+
+Three suspected contributors:
+
+1. **No SIMD shuffles.** Apple GPUs run threads in SIMD-groups of 32.
+   Once `stride <= 32`, the surviving threads are all in the same
+   SIMD-group, and you can swap data via `simd_shuffle_down(value,
+   offset)` directly between registers — no scratch, no barrier. MPS
+   almost certainly does this for the last 5 stages. Ours uses scratch +
+   barrier for all 8.
+2. **One element of useful work per thread.** Each thread loads 1 float,
+   does 1 add per stage, then mostly idles. MPS likely has each thread
+   sum N inputs first (coalesced strided loads), amortizing the 8
+   barriers across more useful arithmetic.
+3. **Late-stage thread idleness.** At stride=1, 1 thread does work and
+   255 wait on the barrier. Inherent to the tree pattern but a real cost
+   on a wide threadgroup.
+
+Did NOT optimize because the *point* of this kernel is to be a clean,
+honest baseline that LLM-generated kernels will be asked to beat. If we
+tune it ourselves, we're tuning the target away from where we want it.
+
+### Decisions made
+
+- p101 ships at 0.53× as the Tier 2 baseline reference, not as a
+  performance achievement. Scaffold (`row_sum_scaffold.metal`)
+  preserved separately so future readers see what was given vs. what was
+  written.
+- Confirmed the harness's CPU-torch reference is fine here despite the
+  open concern from the previous session — atol of 1e-4 absorbs the
+  CPU-sum vs tree-reduction summation-order divergence cleanly
+  (observed 1.14e-5).
+
+### Carry into next session
+
+- `timing_noisy: true` is now firing on a 3ms kernel even when A/B/A is
+  rock-solid. The current IQR threshold (15% of median) may be too tight
+  for short kernels — worth revisiting once a few more reductions land,
+  not now.
+- The SIMD-shuffle vs scratch tradeoff is a candidate for an instructor
+  problem later in Tier 2 ("p1XX_row_sum_simd") if we want a
+  side-by-side that exposes the optimization to students/LLMs.
+
+---
+
 ## 2026-06-22 — Tier 1 fill-out: p007–p012, and the first-run MPS-compilation gotcha
 
 Pushed Tier 1 from two confirmed problems (p001, p002) to ten confirmed
