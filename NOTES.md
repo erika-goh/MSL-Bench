@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-23 — p101 row_sum: first Tier 2 reduction, first MPS loss
+## 2026-06-23 — Tier 2 opener: p101 row_sum, p102 row_max, and the torch.max trap
 
 Opened Tier 2 with the canonical learning reduction: row-wise sum of a
 262144 × 256 float32 matrix, one threadgroup per row, K=256 threads
@@ -80,15 +80,53 @@ tune it ourselves, we're tuning the target away from where we want it.
   CPU-sum vs tree-reduction summation-order divergence cleanly
   (observed 1.14e-5).
 
+### p102 row_max — same pattern, different op, and a fairness trap
+
+Followed p101 with the natural sibling: row-wise max, same launch
+geometry, same tree reduction, swap `+=` for `max()`. Result mirrored
+p101 almost exactly — kernel 3.03ms, reference 1.56ms, speedup 0.517×.
+The structural prediction held: our tree-reduction kernel costs the
+same regardless of combining op (~3.0ms), and MPS's optimized
+reductions also cost the same for sum vs amax (~1.6ms).
+
+`max_abs_err` was **exactly 0.0**, which is the theoretical prediction:
+unlike `+`, the `max` operator is associative AND commutative for
+non-NaN floats, so any reduction order returns the same bit pattern.
+Confirmed empirically; tightened tolerance to 1e-6 for paranoia.
+
+### The torch.max vs torch.amax trap
+
+The first run of p102 used `torch.max(x, dim=1).values` as the
+reference and reported `speedup: 2.876×` — almost 3× over MPS, after
+losing 2× on p101. That gap was suspicious given the kernels are
+structurally identical.
+
+Root cause: `torch.max(x, dim=1)` returns a named tuple
+`(values, indices)`. Even when you immediately discard `.indices`, the
+MPS implementation has already computed the argmax. So we were
+comparing "max + argmax" (MPS) against "max only" (our kernel) —
+inflating reference time roughly 5×. Switching to `torch.amax`, which
+returns values only, dropped reference_ms from 8.69 to 1.56 and the
+speedup from 2.88× to 0.52× — consistent with p101.
+
+Documented inline in `p102_row_max/spec.py` so future readers (and the
+LLM-prompt generator that reads spec descriptions) understand the
+choice. **General principle for reduction problems**: when the natural
+torch API returns auxiliary state (indices, second-largest, etc.),
+use the values-only variant for the reference, or you're benchmarking
+the convenience-API surcharge rather than the op.
+
 ### Carry into next session
 
-- `timing_noisy: true` is now firing on a 3ms kernel even when A/B/A is
-  rock-solid. The current IQR threshold (15% of median) may be too tight
-  for short kernels — worth revisiting once a few more reductions land,
-  not now.
+- `timing_noisy: true` is now firing on the 3ms reductions even when
+  A/B/A is rock-solid. The current IQR threshold (15% of median) may be
+  too tight for short kernels — worth revisiting once a few more
+  reductions land, not now.
 - The SIMD-shuffle vs scratch tradeoff is a candidate for an instructor
   problem later in Tier 2 ("p1XX_row_sum_simd") if we want a
   side-by-side that exposes the optimization to students/LLMs.
+- Next reduction candidates: col_sum (introduces memory coalescing),
+  row_l2_norm (pre-reduction transform), row_softmax (multi-pass).
 
 ---
 
