@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-25 — Tier 2 build-out: p103/p104/p105/p106 — the col_sum arc closed and a 1.18× MPS win
+## 2026-06-25 — Tier 2 build-out: p103/p104/p105/p106/p107 — col_sum arc + the row_sum_atomic experiment
 
 Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
 float32 matrix. Geometry chosen deliberately as a direct translation of
@@ -266,25 +266,68 @@ a future "p1XX_row_sum_atomic" experiment.
   contract some elementwise kernels could rely on (none currently do,
   but the conservative default protects future ones).
 
+### p107 row_sum_atomic — the experiment, and a clean negative-ish result
+
+The carry-forward question from p106 was: does the atomic-fan-out
+pattern dominate over cooperative tree reduce in general, or was the
+col_sum win specific to col_sum's hardware-unfriendly access pattern?
+Tested by porting the exact same atomic structure to row_sum:
+
+| | p101 (cooperative tree) | p107 (atomic fan-out) |
+|---|---|---|
+| Total TGs | 262,144 | 1,048,576 (4×) |
+| Threads / TG | 256 | 64 |
+| Per-TG work | full row tree-reduce (8 stages) | K_CHUNK chunk tree-reduce (6 stages) |
+| Atomic ops / output | 0 | 4 |
+| kernel_ms | 3.01 | **2.89** |
+| Improvement | — | 4% |
+
+Conclusion (cleaner than either an unambiguous win or loss):
+**atomics-with-more-TGs dominates only when the cooperative alternative
+is poorly matched to the hardware**. For col_sum, "poorly matched"
+meant stride-K loads + low TG count → naive cooperative version (p103)
+was at 6.17ms, easy to beat by 4.5× with atomics. For row_sum, the
+cooperative version (p101) was *already* well-matched — coalesced
+loads, 256 cooperating threads, 262K TGs in flight — and the atomic
+variant gives only a marginal 4% improvement.
+
+The lesson is not "atomics are better" or "atomics are not better."
+The lesson is: identify whether your baseline has structural slack
+the alternative pattern can exploit. If yes (col_sum), switching
+pays massively. If no (row_sum), it's roughly a wash.
+
+### Small Metal-language find
+
+When a kernel signature uses BOTH `thread_position_in_threadgroup`
+and `threadgroup_position_in_grid` attributes, they must share their
+vector width — mixing `uint` and `uint2` fails to compile with
+"expecting input declarations with either all scalar types or all
+vector types with the same number of elements". Fix is forced:
+declare both as uint2 (or whatever shape the grid wants), even if
+one dimension is degenerate. Documented inline in p107's scaffold
+since this is a foot-gun for LLM-generated kernels.
+
 ### Carry into next session
 
-- Six Tier 2 problems shipped. Speedups: 0.204× (p105) to 1.18×
-  (p106). Three teaching artifacts (p103/p105 lessons), three real
-  wins-or-baselines (p101/p102/p104), one definitive win on a hard
-  problem (p106). Tier 2 is now substantial enough to be its own
-  section in any future report.
-- The "row_sum_atomic vs row_sum_tree" comparison is a worthwhile
-  follow-up experiment if it doesn't bloat the problem catalog too
-  much. Same op, two different kernel idioms — quantifies the
-  tree-vs-atomic tradeoff on row reductions specifically.
-- Next problem candidates: row_l2_norm (gentler step), row_argmax
-  (non-float outputs, paired reduction), row_var/row_std (two-pass
-  with intermediate), or jump tiers to Tier 3 (tiled matrix ops).
-- Open harness items still on the list: tempfile cleanup in
-  scripts/run_problem.py:34 (low urgency), timing_noisy threshold
-  tuning (firing intermittently on 3ms kernels), CPU-torch reference
-  timing dynamics. Nothing blocking forward progress; queue for a
-  future maintenance pass.
+- **Seven Tier 2 problems** now shipped. Speedups: 0.204× (p105) to
+  1.18× (p106). Two real MPS wins (p104 softmax, p106 col_sum_atomic),
+  two teaching artifacts (p103/p105 col_sum lessons), three baselines
+  (p101/p102/p107).
+- The col_sum + row_sum atomic experiments together suggest a useful
+  diagnostic principle to flag in the eventual report:
+  **"the speedup from switching reduction idioms equals the structural
+  slack of the baseline."** Worth testing on a Tier 3 problem to see
+  if it holds with more arithmetic intensity.
+- Next problem candidates: row_l2_norm (gentler, fills out the
+  reduction taxonomy without new concepts), row_argmax (paired
+  reduction, first non-float output), row_var/row_std (two-pass with
+  intermediate — pairs structurally with softmax), or graduate to
+  Tier 3 (tiled matrix ops — adds shared-memory tile-loading
+  patterns).
+- Open harness items: tempfile cleanup in run_problem.py:34,
+  timing_noisy threshold tuning for short kernels, CPU-torch reference
+  timing dynamics. Nothing blocking; queue for a focused maintenance
+  session.
 
 ---
 
