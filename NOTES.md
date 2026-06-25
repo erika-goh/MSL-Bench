@@ -5,6 +5,82 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-25 — p103 col_sum: the coalescing penalty in isolation
+
+Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
+float32 matrix. Geometry chosen deliberately as a direct translation of
+p101: one threadgroup per output column, 256 threads cooperate, tree-reduce.
+The naive port that exhibits the coalescing penalty on purpose.
+
+### What's new in this problem
+
+- **Memory coalescing.** When 32 threads of a SIMD-group all issue device
+  loads at the same instant, the hardware can fuse them into one wide
+  transaction if the addresses are contiguous. Stride-K addresses force
+  separate transactions per thread. Apple Silicon's unified memory shrinks
+  the dGPU-style gap but doesn't eliminate it.
+- **Row-major storage and its consequences.** `x[b,k]` lives at index
+  `b*K + k`. Adjacent threads reading adjacent columns of the same row →
+  stride-1 → coalesced. Adjacent threads reading adjacent rows of the
+  same column → stride-K → NOT coalesced. That single fact dictates
+  whether the p101-style geometry is appropriate (row reductions) or
+  actively harmful (column reductions).
+- **Interleaved vs blocked work partition.** Each thread had to sum 1024
+  rows. Used interleaved (`for r = tid; r < B; r += TG`) instead of
+  blocked (`for r = tid * 1024; r < (tid+1) * 1024; r++`). Reason: at
+  iteration 0, threads 0..255 read rows 0..255 of one column — a working
+  set tight enough to hit cache with locality even though individual
+  addresses are stride-K. Blocked partitioning would scatter each thread
+  to a different row range, eliminating cross-thread cache reuse.
+
+### Result and the controlled experiment
+
+| metric | row_sum (p101) | col_sum (p103) | ratio |
+|---|---|---|---|
+| kernel_ms | 3.01 | 6.17 | **2.05× slower** |
+| reference_ms | 1.59 | 1.77 | 1.11× slower |
+| speedup vs MPS | 0.527× | 0.287× | — |
+| max_abs_err | 1.14e-5 | 9.77e-4 | (both well under tol) |
+
+The arithmetic in row_sum and col_sum is identical: 67M float adds, 256-way
+tree-reduce. The ONLY difference is the memory access pattern. That makes
+the 2.05× kernel slowdown a clean, controlled measurement of the coalescing
+penalty — about as good an isolated experiment as you get for a hardware
+effect like this.
+
+MPS's own col-sum is only 11% slower than its row-sum, so MPS itself dodges
+~85% of the penalty our naive port pays. Likely mechanism: per-tile
+transpose into threadgroup memory followed by row-style reduction, or
+shuffle-based block transposes.
+
+### Decisions made
+
+- p103 ships at 0.287× as the **naive uncoalesced baseline**, not a
+  performance target. Documented in the spec description and notes that
+  this is intentionally suboptimal — a teaching artifact / LLM-baseline.
+- Future problem (probably p1XX_col_sum_transposed) will demonstrate the
+  coalesced fix via per-tile threadgroup transpose. Useful side-by-side
+  for the eventual report and a good LLM-evaluation target ("can the
+  model recognize the coalescing problem from the spec and apply the
+  transpose trick?").
+
+### Carry into next session
+
+- Three reductions in: 0.527× (sum), 0.517× (max), 0.287× (col_sum). The
+  spread between sum and col_sum shows that the headline "fast_p" metric
+  meaningfully discriminates among reduction patterns; sum/max alone
+  wouldn't have proven that the metric was sensitive to kernel quality vs.
+  just "reductions are hard." Useful for the Phase 4 analysis.
+- Still haven't revisited the `timing_noisy` threshold despite it firing
+  intermittently on 3ms kernels. p103 didn't fire it (kernel was 6ms),
+  consistent with the earlier hypothesis that IQR/15% is tight only on
+  very short kernels.
+- Next candidates remain: row_l2_norm (pre-reduction transform),
+  row_softmax (multi-pass), or the coalesced col_sum sibling for the
+  side-by-side. Probably softmax next — it's the structural jump.
+
+---
+
 ## 2026-06-23 — Tier 2 opener: p101 row_sum, p102 row_max, and the torch.max trap
 
 Opened Tier 2 with the canonical learning reduction: row-wise sum of a
