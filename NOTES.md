@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-25 — p103 col_sum: the coalescing penalty in isolation
+## 2026-06-25 — Tier 2 build-out: p103 col_sum (coalescing) and p104 row_softmax (first win)
 
 Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
 float32 matrix. Geometry chosen deliberately as a direct translation of
@@ -64,20 +64,84 @@ shuffle-based block transposes.
   model recognize the coalescing problem from the spec and apply the
   transpose trick?").
 
+### p104 row_softmax — multi-pass within one kernel, first Tier 2 win
+
+Continued the session with the structural jump: row-wise softmax,
+standard max-subtract stability trick, three phases (max, exp+sum,
+divide) in one kernel. Same matrix shape as everything else: (262144,
+256) in, (262144, 256) out — first Tier 2 problem with a non-scalar
+output.
+
+### What's new
+
+- **Multi-pass reduction inside one kernel.** Previous Tier 2 problems
+  did one reduction per kernel. Softmax needs two (max, sum-of-exp) with
+  a per-element compute step between them and another after. Each pass
+  reuses the same `scratch[K]` array, separated by a barrier-protected
+  read of `scratch[0]` into thread-local registers.
+- **Threadgroup-shared broadcast pattern (and its compiler trap).**
+  First draft used `threadgroup float row_max;` as a one-element shared
+  variable: `if (tid == 0) row_max = scratch[0]; barrier;`. Functionally
+  correct, but Metal's compiler emits `-Wsometimes-uninitialized` —
+  its per-thread flow analysis doesn't model threadgroup memory or
+  barriers, so it concludes "if tid != 0 the variable is never written,
+  yet it's read later." Real false positive but pollutes the harness's
+  diagnostics field (which we feed to the LLM repair loop, so spurious
+  warnings would invite bogus "fixes"). Switched to every-thread
+  read-from-`scratch[0]` instead — same functional pattern, no warning,
+  one fewer barrier per phase. Scaffold documents both patterns since
+  the broadcast-scalar form is genuinely useful elsewhere.
+
+### Result and why we finally win
+
+| metric | row_sum (p101) | row_softmax (p104) | ratio |
+|---|---|---|---|
+| our kernel_ms | 3.01 | 4.06 | 1.35× heavier |
+| MPS reference_ms | 1.59 | 4.44 | **2.79× heavier** |
+| speedup vs MPS | 0.527× | **1.093×** | — |
+| max_abs_err | 1.14e-5 | 5.96e-8 (1 ULP) | — |
+
+The arithmetic in softmax is meaningfully more than in row_sum (extra
+exp per element, an extra division, two reductions instead of one), and
+our kernel reflects that — we slow by 35%. But MPS's softmax is 2.79×
+slower than its sum. The most likely explanation: MPS dispatches
+softmax as **three separate kernels** (max kernel, exp+sum kernel,
+divide kernel), paying its per-dispatch overhead three times. Our
+single-kernel fusion pays it once. That's enough to flip the comparison.
+
+This is the first datapoint where the project's actual thesis shows
+through: "MPS is great at standard ops, but loses to fused
+single-kernel implementations as soon as the op decomposition has
+intermediate values." Softmax is just the easiest such fusion. Worth
+remembering when designing the Phase 3 LLM evaluation — kernels that
+fuse multiple sub-ops are where the benchmark will most cleanly
+separate competent LLMs from struggling ones.
+
+### Decisions made
+
+- Shipped p104 with the every-thread read-from-`scratch[0]` pattern,
+  not the broadcast scalar. Cleaner diagnostics matter more than
+  uniformity with the scaffold; scaffold annotates the choice.
+- Tolerance set to atol=1e-5, rtol=1e-5. Observed 5.96e-8 — exactly
+  1 ULP at output magnitude ~1/K. Tolerance has slack but it's
+  honest given fma vs separate mul-add ordering between Metal and
+  torch could shift things slightly on other inputs.
+
 ### Carry into next session
 
-- Three reductions in: 0.527× (sum), 0.517× (max), 0.287× (col_sum). The
-  spread between sum and col_sum shows that the headline "fast_p" metric
-  meaningfully discriminates among reduction patterns; sum/max alone
-  wouldn't have proven that the metric was sensitive to kernel quality vs.
-  just "reductions are hard." Useful for the Phase 4 analysis.
-- Still haven't revisited the `timing_noisy` threshold despite it firing
-  intermittently on 3ms kernels. p103 didn't fire it (kernel was 6ms),
-  consistent with the earlier hypothesis that IQR/15% is tight only on
-  very short kernels.
-- Next candidates remain: row_l2_norm (pre-reduction transform),
-  row_softmax (multi-pass), or the coalesced col_sum sibling for the
-  side-by-side. Probably softmax next — it's the structural jump.
+- p104's A/B/A delta was 0.05% — the cleanest stability measurement
+  we've gotten on any kernel. Suggests longer kernels (4ms+) escape
+  whatever short-kernel jitter source is firing `timing_noisy` on the
+  3ms problems. Still no harness change required; reductions naturally
+  drift toward longer running times.
+- Four reductions in: 0.527× (sum), 0.517× (max), 0.287× (col_sum),
+  1.093× (softmax). The spread (0.287×–1.093×, ~3.8× range) is now
+  large enough that the harness's `fast_p` metric will resolve real
+  differences in LLM kernel quality.
+- Next candidates: row_l2_norm (lighter, fills out the reduction
+  taxonomy), coalesced col_sum sibling (the optimization side-by-side
+  story), or jump to a different reduction shape — argmax (returns
+  indices, not values), or row_var/row_std (two-pass with subtract).
 
 ---
 
