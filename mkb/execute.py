@@ -42,6 +42,7 @@ def run_kernel(
     warmup_ms_max: float = 500.0,
     warmup_iter_max: int = 10_000,
     runs: int = 10,
+    zero_output_each_run: bool = False,
     runner_path: Path | None = None,
 ) -> ExecResult:
     runner = Path(os.environ.get("MKB_RUNNER", runner_path or DEFAULT_RUNNER))
@@ -75,6 +76,7 @@ def run_kernel(
             "warmup_ms_max": warmup_ms_max,
             "warmup_iter_max": warmup_iter_max,
             "runs": runs,
+            "zero_output_each_run": zero_output_each_run,
         }
         mpath = tdir / "manifest.json"
         mpath.write_text(json.dumps(manifest))

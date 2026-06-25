@@ -23,6 +23,11 @@ struct Manifest: Codable {
     let warmup_ms_max: Double
     let warmup_iter_max: Int
     let runs: Int
+    // When true, output buffers are re-zeroed before every dispatch.
+    // Required for atomic-accumulator kernels — without it, repeat
+    // dispatches accumulate on top of prior results. Defaults to false
+    // since elementwise kernels overwrite outputs and don't need it.
+    let zero_output_each_run: Bool?
 }
 
 struct RunResult: Codable {
@@ -89,7 +94,17 @@ if tg.width * tg.height * tg.depth > pipeline.maxTotalThreadsPerThreadgroup {
     fail("threadgroup size \(tg) exceeds max \(pipeline.maxTotalThreadsPerThreadgroup) for this kernel")
 }
 
+let zeroEachRun = m.zero_output_each_run ?? false
+
 func dispatchOnce() -> Double? {
+    // CPU-side memset of outputs before encode. Happens outside the GPU
+    // timing window (we read cmd.gpuStartTime/gpuEndTime), so the cost
+    // does not contaminate kernel_ms. Only matters for atomic kernels.
+    if zeroEachRun {
+        for (i, spec) in m.buffers.enumerated() where spec.mode == "out" {
+            memset(mtlBuffers[i].contents(), 0, spec.bytes)
+        }
+    }
     guard let cmd = queue.makeCommandBuffer(),
           let enc = cmd.makeComputeCommandEncoder() else { return nil }
     enc.setComputePipelineState(pipeline)

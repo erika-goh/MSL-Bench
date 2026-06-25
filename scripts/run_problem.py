@@ -51,9 +51,11 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
     # is timing-only. If candidate medians from blocks 1 and 3 disagree, the
     # machine state shifted across the reference block in between and the
     # speedup ratio is untrustworthy.
+    zero_each = problem.get("zero_output_each_run", False)
     exec_1 = run_kernel(
         comp.metallib, problem["entry_point"], grid, threadgroup,
         inputs, problem["outputs"],
+        zero_output_each_run=zero_each,
     )
     if not exec_1.ok:
         result["error"] = exec_1.error
@@ -80,6 +82,7 @@ def run_one(problem_id: str, kernel_path: Path, calibrate: bool = False) -> dict
     exec_3 = run_kernel(
         comp.metallib, problem["entry_point"], grid, threadgroup,
         inputs, problem["outputs"],
+        zero_output_each_run=zero_each,
     )
     if not exec_3.ok:
         result["error"] = exec_3.error

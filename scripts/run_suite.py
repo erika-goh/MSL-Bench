@@ -43,7 +43,8 @@ def evaluate_kernel(kernel_src: str, problem: dict, reference) -> tuple[bool, st
     grid, threadgroup = P.launch_config(problem)
     inputs = P.make_inputs(problem)
     res = run_kernel(comp.metallib, problem["entry_point"], grid, threadgroup,
-                     inputs, problem["outputs"])
+                     inputs, problem["outputs"],
+                     zero_output_each_run=problem.get("zero_output_each_run", False))
     if not res.ok:
         return False, f"RUNTIME ERROR: {res.error}", {"stage": "runtime"}
 
