@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-25 — Tier 2 build-out: p103/p104/p105/p106/p107 — col_sum arc + the row_sum_atomic experiment
+## 2026-06-25 — Tier 2 build-out: p103/p104/p105/p106/p107/p108 — col_sum arc, atomic experiment, and the biggest MPS win yet
 
 Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
 float32 matrix. Geometry chosen deliberately as a direct translation of
@@ -307,12 +307,75 @@ declare both as uint2 (or whatever shape the grid wants), even if
 one dimension is degenerate. Documented inline in p107's scaffold
 since this is a foot-gun for LLM-generated kernels.
 
+### p108 row_argmax — paired reduction, first non-float output, biggest MPS win yet
+
+Wrapped the session with the first non-float problem in the project.
+Same one-TG-per-row, K=256-thread cooperative tree as p101/p102, but
+each scratch slot now carries a (value, index) PAIR instead of one
+float — two parallel threadgroup arrays kept in lockstep. Output is
+int32 (the column index of the row maximum).
+
+### What's new
+
+- **Paired reduction.** Two threadgroup arrays propagating together
+  through the tree. At each stage, the winning value's index moves
+  with it. The convention for ties: use strict `>` instead of `>=`
+  so equal values keep the existing (lower-index) survivor —
+  matches torch.argmax's "first maximal" rule.
+- **Non-float output.** First int32 output in the project. Harness
+  handled it without changes: the runner sees bytes, execute.py
+  applies the dtype on read-back, verify uses np.allclose with
+  atol=rtol=0 to demand exact integer equality. Confirms the dtype
+  plumbing is general for future int/uint problems.
+
+### Result — and a phenomenon worth flagging
+
+| metric | p102 row_max (value only) | p108 row_argmax (paired) |
+|---|---|---|
+| kernel_ms | 3.02 | 3.09 |
+| reference_ms | 1.56 | **6.66** |
+| speedup vs MPS | 0.52× | **2.16×** |
+| max_abs_err | 0.0 (bit-exact) | 0.0 (bit-exact int) |
+
+Two things at once:
+
+1. **The kernel cost is essentially unchanged** by adding index
+   tracking. Same tree, same number of barriers, two arrays instead
+   of one — measurement bears this out (3.09 vs 3.02). So the
+   "harder" version is functionally free.
+
+2. **MPS pays 4× more for argmax than max** (6.66 vs 1.56). Likely
+   reason: MPS's argmax goes through a more general path that may
+   compute both the max value AND the index (or carries larger
+   auxiliary state) regardless of which the caller asked for.
+   Same story as the `torch.max` vs `torch.amax` trap we hit earlier
+   in the day — MPS's general-purpose paths can pay for capabilities
+   the caller doesn't use.
+
+Net effect: the speedup jumps from 0.52× to 2.16× — a **4.1×**
+improvement in relative position — purely from picking a problem
+where MPS's overhead is higher than its base reduction cost.
+**Kernels that look harder (more bookkeeping) can actually be
+easier wins for purpose-built code.** Worth documenting as a
+general principle in the Phase 4 report.
+
+### Decisions made
+
+- Output dtype is int32, not int64. torch.argmax's default is int64
+  but K=256 fits in int8; int32 halves the output buffer vs torch's
+  native and matches Metal's natural integer width. Spec's reference
+  casts down before comparison.
+- Tolerance set to atol=0, rtol=0. With randn inputs, true ties at
+  the maximum have probability zero, so the integer match has no
+  slack to give. If verification ever fails on this, the kernel has
+  a real bug — not a numerics issue.
+
 ### Carry into next session
 
-- **Seven Tier 2 problems** now shipped. Speedups: 0.204× (p105) to
-  1.18× (p106). Two real MPS wins (p104 softmax, p106 col_sum_atomic),
-  two teaching artifacts (p103/p105 col_sum lessons), three baselines
-  (p101/p102/p107).
+- **Eight Tier 2 problems** now shipped. Speedups: 0.204× (p105) to
+  **2.16× (p108)**. Three real MPS wins (p104 softmax, p106
+  col_sum_atomic, p108 row_argmax), two teaching artifacts (p103/p105
+  col_sum lessons), three baselines (p101/p102/p107).
 - The col_sum + row_sum atomic experiments together suggest a useful
   diagnostic principle to flag in the eventual report:
   **"the speedup from switching reduction idioms equals the structural
