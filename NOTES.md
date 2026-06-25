@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-25 — Tier 2 build-out: p103 col_sum, p104 row_softmax (first win), p105 the coalescing-backfire lesson
+## 2026-06-25 — Tier 2 build-out: p103/p104/p105/p106 — the col_sum arc closed and a 1.18× MPS win
 
 Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
 float32 matrix. Geometry chosen deliberately as a direct translation of
@@ -186,25 +186,105 @@ measurable, but it cannot overcome the latency exposure from launching
   win would be, partly because atomics/two-pass deserves its own
   setup work in the harness.
 
+### p106 col_sum_atomic — the real fix, and a satisfying close to the arc
+
+Built the actually-coalesced col_sum, finishing the p103 → p105 → p106
+story. Kept p105's (32, 8) thread tile for SIMD-group-wide coalescing,
+but added a Y-axis dimension of threadgroups: 256 row-block TGs × 8
+column-block TGs = 2048 TGs total. Each TG computes 32 per-column
+partials over a ROW_CHUNK=1024 slice; thread (tx, 0) does an
+atomic_fetch_add into out[col] to combine across TGs.
+
+### What's new (this is the heaviest concept day of the session)
+
+- **Metal 3 `atomic_float`.** Buffer is declared `device atomic_float*`
+  in the kernel signature even though the host MTLBuffer is plain
+  float bytes — Metal interprets the same bytes as atomic based on
+  the kernel-side type. Operations live in `<metal_atomic>` (pulled
+  in by `<metal_stdlib>`).
+- **`atomic_fetch_add_explicit` with `memory_order_relaxed`.** Memory
+  orders in Metal mirror C++ atomics. We need atomicity (no two TGs
+  corrupt each other's update) but not ordering w.r.t. other memory
+  ops, so `relaxed` is the cheapest correct choice.
+- **Cross-threadgroup combination via atomics.** Threadgroups cannot
+  synchronize within a single dispatch — there is no `grid_barrier`
+  primitive. The only way for two TGs to combine values without
+  spawning a second kernel is via atomic ops on device memory.
+
+### Harness change required (and made)
+
+Atomic accumulators require the output buffer to start at zero on
+**every** dispatch — the harness's warmup + timed loop reuses one
+buffer, and without per-run zeroing the second dispatch sees the
+first dispatch's result and produces 2× sums, etc.
+
+Added an optional `zero_output_each_run` flag end-to-end (spec →
+Python plumbing → Swift manifest → CPU memset in dispatchOnce, before
+encoding, outside the GPU timing window). Defaults to false so
+existing problems are unaffected; p106 sets it true. Regression-
+tested p101 post-change: kernel_ms identical, correctness identical.
+
+This is the first time a new problem required a harness change. Worth
+noting as a process pattern: when a kernel category needs new
+semantics from the runner, change the runner once, then keep going.
+
+### The full col_sum arc, side-by-side
+
+| problem | design | kernel_ms | speedup | what it teaches |
+|---|---|---|---|---|
+| p103 col_sum | naive: 1 TG / col, 256 threads, uncoalesced | 6.17 | 0.287× | the cost of stride-K loads |
+| p105 col_sum_tiled_naive | (32, 8) tile, only 8 TGs | 10.77 | 0.204× | coalescing without parallelism is worse |
+| p106 col_sum_atomic | (32, 8) tile × 256 row blocks + atomics | **1.38** | **1.18×** | the actual fix; 4.5× over baseline, beats MPS |
+
+The three together form a clean teaching triangle: optimizing one
+corner (coalescing) without the others (parallelism, atomic
+contention) can be net-negative; getting all three right beats MPS
+on a problem MPS has had years to tune.
+
+p106 at 1.38ms reading 256MB of input is ~185 GB/s throughput — the
+kernel is approaching Apple Silicon's measured memory bandwidth
+ceiling. Further wins on this exact problem need algorithmic moves
+(smaller dtypes, sparse access, etc.), not kernel tuning.
+
+Surprising side observation: p106 col_sum (1.38ms) is faster than
+our own p101 row_sum (3.01ms) despite col_sum being "supposed to be
+the harder one." Hypothesis: the high TG count (2048 vs 256) and
+atomic-instead-of-tree-reduce structure of p106 saves more than it
+costs vs row_sum's lower-parallelism cooperative reduction. Suggests
+a future "p1XX_row_sum_atomic" experiment.
+
+### Decisions made
+
+- p106 ships as a real benchmark target (not a teaching artifact like
+  p105). Should set the bar that LLM-generated col_sum kernels are
+  measured against.
+- Did NOT roll the harness change into the same commit as p106. Kept
+  it as standalone infrastructure work that any future atomic kernel
+  can lean on.
+- `zero_output_each_run` deliberately defaults to false. Adding it
+  silently would have broken the implicit "outputs aren't reset"
+  contract some elementwise kernels could rely on (none currently do,
+  but the conservative default protects future ones).
+
 ### Carry into next session
 
-- p104's A/B/A delta was 0.05% — the cleanest stability measurement
-  we've gotten on any kernel. Suggests longer kernels (4ms+) escape
-  whatever short-kernel jitter source is firing `timing_noisy` on the
-  3ms problems. Still no harness change required; reductions naturally
-  drift toward longer running times.
-- Five reductions in: 0.527× (sum), 0.517× (max), 0.287× (col_sum),
-  1.093× (softmax), 0.204× (tiled_naive). The spread (0.204×–1.093×,
-  ~5.4× range) is now wide enough that the `fast_p` metric will easily
-  resolve LLM kernel quality differences.
-- Next candidates: row_l2_norm (lighter, fills out the reduction
-  taxonomy), row_argmax (non-float outputs), col_sum_atomic (the real
-  fix for p103/p105 via Metal 3 atomic floats), or row_var/row_std
-  (two-pass with subtract — pairs nicely with the softmax structure).
-- Atomic-float problem (when we eventually do it) needs a small harness
-  audit first: does our reference timing wrap correctly when MPS uses
-  one path and the kernel uses atomics? Probably fine — both produce
-  the same output — but worth a sanity pass.
+- Six Tier 2 problems shipped. Speedups: 0.204× (p105) to 1.18×
+  (p106). Three teaching artifacts (p103/p105 lessons), three real
+  wins-or-baselines (p101/p102/p104), one definitive win on a hard
+  problem (p106). Tier 2 is now substantial enough to be its own
+  section in any future report.
+- The "row_sum_atomic vs row_sum_tree" comparison is a worthwhile
+  follow-up experiment if it doesn't bloat the problem catalog too
+  much. Same op, two different kernel idioms — quantifies the
+  tree-vs-atomic tradeoff on row reductions specifically.
+- Next problem candidates: row_l2_norm (gentler step), row_argmax
+  (non-float outputs, paired reduction), row_var/row_std (two-pass
+  with intermediate), or jump tiers to Tier 3 (tiled matrix ops).
+- Open harness items still on the list: tempfile cleanup in
+  scripts/run_problem.py:34 (low urgency), timing_noisy threshold
+  tuning (firing intermittently on 3ms kernels), CPU-torch reference
+  timing dynamics. Nothing blocking forward progress; queue for a
+  future maintenance pass.
 
 ---
 
