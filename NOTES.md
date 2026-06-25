@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-25 — Tier 2 build-out: p103 col_sum (coalescing) and p104 row_softmax (first win)
+## 2026-06-25 — Tier 2 build-out: p103 col_sum, p104 row_softmax (first win), p105 the coalescing-backfire lesson
 
 Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
 float32 matrix. Geometry chosen deliberately as a direct translation of
@@ -127,6 +127,65 @@ separate competent LLMs from struggling ones.
   honest given fma vs separate mul-add ordering between Metal and
   torch could shift things slightly on other inputs.
 
+### p105 col_sum_tiled_naive — the coalescing fix that backfires
+
+After p104, picked up the "fix p103's coalescing" thread. Wrote a (32, 8)
+2D threadgroup so each SIMD-group reads 32 consecutive columns at the
+same instant — by-the-book coalescing fix. Predicted 3–5× speedup vs
+p103. Got 1.75× SLOWER instead (10.77ms vs 6.17ms, speedup 0.204×).
+
+This is the most instructive surprise of the session.
+
+### What's new (and the lesson)
+
+- **2D thread indexing within a threadgroup.** `thread_position_in_threadgroup`
+  is `uint2`; threads are addressed by `(x, y)` instead of one linear index.
+  Metal linearizes threads into SIMD-groups of 32 along x-axis first, so a
+  (32, 8) TG puts threads `(0..31, ty)` into one SIMD-group for each `ty`.
+  Threads in a SIMD-group share `ty` and have consecutive `tx` — and if you
+  arrange your address calculation so consecutive `tx` maps to consecutive
+  memory addresses, you get coalesced loads.
+- **The coalescing-vs-parallelism tradeoff.** Coalescing on its own isn't a
+  speedup — it's *one corner* of a triangle whose other two corners are
+  *total parallelism* (TGs in flight) and *per-thread work* (sequential
+  iterations). p105 fixed the coalescing corner at the cost of crashing
+  the parallelism corner.
+
+### The arithmetic of the surprise
+
+|  | p103 col_sum | p105 col_sum_tiled_naive |
+|---|---|---|
+| Total threadgroups | 256 | **8** |
+| Threads per TG | 256 | 256 |
+| Total threads in flight | 65,536 | **2,048** |
+| Per-thread row work | 1,024 | 32,768 |
+| Memory pattern | uncoalesced | coalesced |
+| kernel_ms | 6.17 | **10.77** |
+
+The (32, 8) tile spends 256 threads to cover 32 output columns at once,
+dropping the TG count by 32×. Apple Silicon's GPU expects many TGs in
+flight to hide memory and ALU latency. With only 8 TGs total, most of
+the GPU's cores sit idle while the surviving threads chew through 32,768
+sequential reads each. The coalescing win on each load is real and
+measurable, but it cannot overcome the latency exposure from launching
+2,048 threads onto hardware that wants ~10,000+.
+
+### Decisions made
+
+- Shipped p105 as the LESSON. Renamed the directory and entry_point to
+  `p105_col_sum_tiled_naive` so the failure mode is visible at the path
+  level. Documented prominently in spec description and notes that this
+  is intentionally suboptimal — for LLM eval, kernels matching this
+  design should be rejected, not rewarded.
+- The "real" fix (more TGs per column + atomic / two-pass cross-TG
+  reduction) is deferred to its own future problem rather than rolled
+  into p105. Atomics on `device atomic_float` need Metal 3 and have
+  their own performance characteristics worth a dedicated problem.
+- Did NOT chase a working coalesced version this session — partly
+  because the lesson kernel is more pedagogically valuable than the
+  win would be, partly because atomics/two-pass deserves its own
+  setup work in the harness.
+
 ### Carry into next session
 
 - p104's A/B/A delta was 0.05% — the cleanest stability measurement
@@ -134,14 +193,18 @@ separate competent LLMs from struggling ones.
   whatever short-kernel jitter source is firing `timing_noisy` on the
   3ms problems. Still no harness change required; reductions naturally
   drift toward longer running times.
-- Four reductions in: 0.527× (sum), 0.517× (max), 0.287× (col_sum),
-  1.093× (softmax). The spread (0.287×–1.093×, ~3.8× range) is now
-  large enough that the harness's `fast_p` metric will resolve real
-  differences in LLM kernel quality.
+- Five reductions in: 0.527× (sum), 0.517× (max), 0.287× (col_sum),
+  1.093× (softmax), 0.204× (tiled_naive). The spread (0.204×–1.093×,
+  ~5.4× range) is now wide enough that the `fast_p` metric will easily
+  resolve LLM kernel quality differences.
 - Next candidates: row_l2_norm (lighter, fills out the reduction
-  taxonomy), coalesced col_sum sibling (the optimization side-by-side
-  story), or jump to a different reduction shape — argmax (returns
-  indices, not values), or row_var/row_std (two-pass with subtract).
+  taxonomy), row_argmax (non-float outputs), col_sum_atomic (the real
+  fix for p103/p105 via Metal 3 atomic floats), or row_var/row_std
+  (two-pass with subtract — pairs nicely with the softmax structure).
+- Atomic-float problem (when we eventually do it) needs a small harness
+  audit first: does our reference timing wrap correctly when MPS uses
+  one path and the kernel uses atomics? Probably fine — both produce
+  the same output — but worth a sanity pass.
 
 ---
 
