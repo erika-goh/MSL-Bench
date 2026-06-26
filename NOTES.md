@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-26 — Tier 3: p201 baseline → p202 matrix unit → p203 staged+multitile, gap to MPS now ~1.5×
+## 2026-06-26 — Tier 3 matmul ladder: p201/p202/p203 close the gap, p204 backfires (lesson)
 
 Jumped from Tier 2 (reductions) to Tier 3 (tiled). One problem
 shipped: p201_matmul_tiled, a naive 16×16-tile kernel for square
@@ -197,22 +197,83 @@ per problem instead of a range.
   complex — LLMs being benchmarked on this problem need the framing
   the scaffold provides.
 
+### p204 — double-buffered matmul that BACKFIRES (lesson, like p105)
+
+Added textbook double-buffering on top of p203: two sets of A/B
+stage buffers, prologue + main loop with overlapped load/compute +
+epilogue. Structurally correct, verifies bit-exact. But the kernel
+runs **45% slower than p203** (1.48ms vs 1.02ms).
+
+Three teaching artifacts now in the catalog showing different ways
+"textbook" GPU optimizations can fail:
+
+- **p105**: 2D thread tile for coalescing → starves parallelism
+- **p107**: atomic fan-out for row_sum → cooperative already saturates
+- **p204**: explicit double-buffering → compiler already pipelined
+
+Two hypotheses for why p204 failed (likely both contribute):
+
+1. **Apple's Metal compiler already pipelined p203's independent
+   loads with compute.** Within each barrier-bounded region, the
+   compiler is free to overlap device-memory loads with matrix-unit
+   ops as long as the dependency graph allows. Our explicit
+   double-buffer added no information the compiler didn't already
+   have.
+2. **2× threadgroup-memory footprint (8KB vs 4KB) reduced
+   occupancy.** Apple Silicon co-resident multiple TGs per core to
+   hide latency by switching between them. Doubling TG memory
+   halves the resident TG count, weakening latency hiding — the
+   optimization meant to hide latency reduced the GPU's *general*
+   ability to hide latency.
+
+Renamed to `p204_matmul_double_buffered_backfires` so the failure
+mode is visible at the path level. Same playbook as p105.
+
+### The emerging principle, now with three data points
+
+"Textbook GPU optimizations are contextual."
+
+A pattern that helps in one context can be net-negative when:
+- The compiler already does it implicitly (p204)
+- It breaks a different constraint (p105)
+- The baseline didn't have slack to exploit (p107)
+
+Useful framing for the eventual Phase 4 report: an LLM that has
+*memorized* GPU optimization recipes will propose p105/p107/p204-
+style kernels with confidence. An LLM that has *learned* GPU
+performance will recognize when context invalidates the recipe.
+The benchmark catalog now has three problems whose specific role
+is to surface this distinction.
+
+### The full Tier 3 ladder
+
+| problem | kernel_ms | speedup vs MPS (steady) | net |
+|---|---|---|---|
+| p201 naive 16×16 | 3.00 | 0.29× | baseline |
+| p202 matrix unit | 1.65 | 0.47× | 1.82× over p201 |
+| p203 staged+multi-tile | **1.02** | **~0.65×** | 1.62× over p202 |
+| p204 + double-buffered | 1.48 | 0.45× | **0.69× over p203 (LESSON)** |
+
+The optimization ladder is p201 → p202 → p203. p204 is a fork that
+documents why one further "obvious" step doesn't work.
+
 ### Carry into next session
 
-- **22 problems total** (11 Tier 1, 8 Tier 2, 3 Tier 3). Three real
-  MPS wins from Tier 2 still stand; the matmul ladder gets within
-  ~1.5× of MPS but hasn't crossed it.
-- Next Tier 3 candidate is **double-buffering** (overlap stage loads
-  with matrix-unit compute) — the remaining optimization axis after
-  staging and multi-tile. Last meaningful single-step gap-closer
-  available.
-- The harness frictions are escalating from "interesting" to "worth
-  a focused session": A/B/A stability threshold + MPS reference
-  warmup + tempfile cleanup. Together about 1–2 hours of focused
-  work. Probably worth doing before more Tier 3 comparisons.
-- We're at the right time to consider a Phase 3 dry-run — 22 problems
-  is plenty of variety to exercise the LLM eval pipeline. Could
-  even be next session if forward motion stalls on harness work.
+- **23 problems total** (11 Tier 1, 8 Tier 2, 4 Tier 3). Three real
+  MPS wins still stand (p104, p106, p108). Matmul ladder reaches
+  ~0.65× best-case, gap unlikely to close further without
+  hand-tuning specific to the Apple matrix unit's micro-architecture
+  (not the level the benchmark wants).
+- Next Tier 3 directions: a different op entirely (conv2d, transpose,
+  attention) for breadth; OR push into Tier 4 (fused composites
+  where the project's actual thesis lives).
+- The harness fricitions have NOT been addressed yet (MPS reference
+  warmup, A/B/A threshold thermal sensitivity). Both bit again on
+  p204 (the first run's stability flag fired). Still doable in a
+  focused 1-2 hour session.
+- Phase 3 dry-run is still the highest-information-value option
+  if forward motion stalls. 23 problems is plenty to surface eval
+  infrastructure issues.
 
 ---
 
