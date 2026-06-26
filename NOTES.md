@@ -5,6 +5,101 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-26 — Tier 3 opener: p201 matmul_tiled and the first BLAS comparison
+
+Jumped from Tier 2 (reductions) to Tier 3 (tiled). One problem
+shipped: p201_matmul_tiled, a naive 16×16-tile kernel for square
+1024×1024 float32 matmul. The biggest concept jump of the project
+so far — three new Metal patterns arrive together.
+
+### What's new
+
+- **Cooperative tile loading.** Up to now, threads in a TG either
+  loaded their own input (elementwise) or loaded one element into a
+  shared scratch for reduction. For matmul, threads cooperatively
+  load TILES of A and B into threadgroup memory, then *all 256
+  threads reuse the loaded tile* for the inner k-loop. Device-memory
+  reads per output drop from 2·K=2048 to 2·K/TILE=128 — a 16× cut
+  in device traffic from one design choice.
+- **K-loop accumulator.** Each thread carries one float across the
+  whole outer loop (K/TILE iterations), adding TILE multiply-adds
+  per iteration. No tree reduction, no shared-memory reduction at
+  the end — the accumulator stays in a register the whole time.
+- **2D output block per TG.** First problem where a single TG
+  computes a 2D block of output. Thread (ty, tx) in TG (by, bx)
+  owns exactly C[by·TILE+ty, bx·TILE+tx].
+
+### Result
+
+| metric | value |
+|---|---|
+| compiled | true |
+| correct | true |
+| max_abs_err | **0.0 exactly** (1M elements all bit-identical) |
+| kernel_ms | 3.00 (extremely stable, A/B/A delta < 0.6%) |
+| reference_ms | 1.91 first run, 0.70–0.90 steady state |
+| speedup | ~0.29× steady state (~0.64× first run) |
+
+### Two findings worth pinning
+
+**1. The reference shows MPS's first-run shader compile cost again.**
+First call to torch's matmul on (1024, 1024) shape in a fresh process
+takes 1.91ms. Subsequent calls in *new* processes drop to 0.7–0.9ms,
+matching the OS-level shader cache pattern we documented for Tier 1
+elementwise. Implication for Tier 3: every benchmark run needs at
+least one warmup invocation of the reference op before timing, or
+the headline number will undercount MPS's overhead. The harness
+currently times the reference once after the candidate's first
+block, which is enough for the first-run penalty to land inside the
+measurement. Worth a follow-up harness pass.
+
+**2. Bit-exact match against torch CPU reference is real, not a bug.**
+Manually sanity-checked: same shape, same min/max/mean to all
+reported digits, same values at every sampled position. Hypothesis:
+PyTorch on macOS uses Apple's Accelerate framework, which uses a
+tile structure compatible with our 16×16 layout. The accumulation
+order ends up matching exactly. This won't hold for differently-
+tiled future matmul variants (32×32, vectorized loads with float4,
+SIMD-shuffles), so the spec's tolerance is kept at the realistic
+slack (atol=1e-2) rather than being collapsed to 0 just because
+p201 happens to match.
+
+### Decisions made
+
+- Sizes set to M=N=K=1024 — small enough for fast iteration (~3ms),
+  large enough to expose meaningful timing differences against MPS,
+  and divisible by TILE=16 cleanly so we don't need bounds checks
+  in this baseline. Bounds-checked variant comes as a later problem.
+- TILE=16 chosen for (a) clean SIMD-group division (16×16 threads
+  = 256 = 8 SIMD-groups), (b) modest shared-memory footprint
+  (2KB per TG), (c) clean dim divisibility. Larger tiles (32×32) will
+  be a follow-up optimization problem.
+- Did NOT attempt to beat MPS in p201. The naive tiled kernel is the
+  baseline; future Tier 3 problems (vectorized loads, more outputs
+  per thread, simdgroup_matrix, AMX) will claw back the 4× gap.
+
+### Carry into next session
+
+- **Nine reductions/tile problems** total. The reference-timing
+  first-run penalty is a real harness gap that bit Tier 1 and is
+  now biting Tier 3 — worth a focused harness session: add a
+  reference warmup before measurement, OR run the reference more
+  than once and median it.
+- Next Tier 3 candidates: matmul_tiled_32 (TILE=32, more reuse per
+  load), matmul_more_per_thread (each thread computes 4 outputs,
+  reducing TG count and amortizing the K-loop), or jump sideways
+  to matmul_simdgroup using simdgroup_matrix multiply intrinsics
+  (Apple-specific, biggest potential speedup).
+- The "harder kernel = easier MPS win" thesis from p108 argmax is
+  about to be tested in the OTHER direction with matmul. Matmul is
+  where Apple has spent the most BLAS tuning effort — if even our
+  best Tier 3 kernel can't beat MPS, that's a useful project
+  finding ("MPS is unbeatable on standard primitives where Apple
+  spent years optimizing; the wins are in less-tuned ops and
+  fused composites").
+
+---
+
 ## 2026-06-25 — Tier 2 build-out: p103/p104/p105/p106/p107/p108 — col_sum arc, atomic experiment, and the biggest MPS win yet
 
 Added the third Tier 2 problem: column-wise sum (axis=0) of a 262144 × 256
