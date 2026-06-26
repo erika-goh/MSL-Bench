@@ -98,7 +98,11 @@ tests/      portable tests (verify/score/timing) + Mac-only end-to-end harness t
 - [ ] Phase 2 — problem suite: ~60 problems across 4 tiers (elementwise → reductions → tiled → fused)
 - [ ] Phase 3 — LLM evaluation: one-shot vs repair@5 across free models
 - [ ] Phase 4 — analysis: failure taxonomy, difficulty cliff, report + article
-- [ ] Phase 5 — (separate repo) data flywheel: repair transcripts → SFT → re-benchmark
+- [ ] Phase 5 — public demo: web leaderboard with kernel-vs-MPS side-by-side, live
+      latency bars, failure-class heatmap, and a "watch the kernel run" view.
+      Positioning: *"A benchmark that measures how well LLMs write GPU kernels —
+      and where they break."* Stack TBD.
+- [ ] Phase 6 — (separate repo) data flywheel: repair transcripts → SFT → re-benchmark
 
 ## Known limitations (v0.1, by design)
 
