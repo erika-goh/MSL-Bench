@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-26 — Tier 3 matmul ladder: p201/p202/p203 close the gap, p204 backfires (lesson)
+## 2026-06-26 — Tier 3 matmul ladder + Tier 4 opener (p301 layernorm), and the fusion thesis nuance
 
 Jumped from Tier 2 (reductions) to Tier 3 (tiled). One problem
 shipped: p201_matmul_tiled, a naive 16×16-tile kernel for square
@@ -257,23 +257,84 @@ is to surface this distinction.
 The optimization ladder is p201 → p202 → p203. p204 is a fork that
 documents why one further "obvious" step doesn't work.
 
+### p301 layernorm — Tier 4 opener, fusion thesis tested directly
+
+After the Tier 3 matmul ladder closed, jumped to Tier 4 (fused
+composites). Layernorm is the textbook fusion test case: row-wise
+mean + variance reduction, then per-element normalize-and-affine
+transform. All in one kernel.
+
+Implementation trick used: compute sum and sumsq in **one combined
+tree-reduce** carrying both arrays, then derive variance via the
+algebraic identity `var = E[x²] - E[x]² = sumsq/K - (sum/K)²`.
+Saves a full reduction pass over (x - mean)² at the cost of some
+numerical slack (irrelevant for unit-scale randn input).
+
+### Result and the conditional thesis
+
+```
+kernel_ms 3.36   reference_ms 3.27   speedup 0.97×
+```
+
+Essentially tied with MPS. `max_abs_err 1.43e-6` under 1e-4 atol.
+Stable across two runs.
+
+The interesting comparison is against the other "fused composite"
+data point we have:
+
+| problem | speedup | what MPS does |
+|---|---|---|
+| p104 softmax (Tier 2) | **1.09×** | MPS dispatches as multiple kernels |
+| p301 layernorm (Tier 4) | **0.97×** | MPS already has it fused |
+
+Both are equally common ML ops. The asymmetry isn't about how
+"fusible" they are — it's about whether Apple has bothered to fuse
+them in MPS. Softmax has apparently been overlooked; layernorm has
+not.
+
+**The project's "fused single-kernel beats MPS" thesis is contingent
+on MPS's per-op optimization investment, not on the inherent
+fusibility of the op.** This nuance matters for the Phase 4 report:
+the wins are real but won't generalize uniformly across all
+composites. Some Tier 4 problems will win (where Apple skipped
+fusion), others will tie (where they didn't).
+
+### Decisions made
+
+- Used `gamma="constant", value=1.0` and `beta="zeros"` for the first
+  layernorm test. Identity-like affine exercises the affine code path
+  without adding error-source variance. Future problem variant could
+  add randomized gamma/beta if we want to verify the affine works
+  under more stress.
+- Tier 4 directory created with `__init__.py`. Same glob-based
+  discovery means it picks up automatically.
+- Did NOT chase the remaining 3% gap. The 0.97× number is the actual
+  finding — adjusting the kernel further would muddy the data point.
+
 ### Carry into next session
 
-- **23 problems total** (11 Tier 1, 8 Tier 2, 4 Tier 3). Three real
-  MPS wins still stand (p104, p106, p108). Matmul ladder reaches
-  ~0.65× best-case, gap unlikely to close further without
-  hand-tuning specific to the Apple matrix unit's micro-architecture
-  (not the level the benchmark wants).
-- Next Tier 3 directions: a different op entirely (conv2d, transpose,
-  attention) for breadth; OR push into Tier 4 (fused composites
-  where the project's actual thesis lives).
-- The harness fricitions have NOT been addressed yet (MPS reference
-  warmup, A/B/A threshold thermal sensitivity). Both bit again on
-  p204 (the first run's stability flag fired). Still doable in a
-  focused 1-2 hour session.
-- Phase 3 dry-run is still the highest-information-value option
-  if forward motion stalls. 23 problems is plenty to surface eval
-  infrastructure issues.
+- **24 problems total** (11 Tier 1, 8 Tier 2, 4 Tier 3, 1 Tier 4).
+  Four real MPS wins from earlier (p104, p106, p108, partial matmul
+  ladder); p301 is a clean tie. The fusion thesis is now nuanced
+  rather than naïve.
+- **Next Tier 4 candidates** (the place to keep pushing the thesis):
+  - **p302_attention_head**: matmul + softmax + matmul, single
+    kernel. MPS likely dispatches as 3 kernels (matmul, softmax,
+    matmul) at minimum — biggest potential fusion win in the
+    project so far. But also the most complex kernel we'd write.
+  - **p302_fused_linear_relu**: matmul + bias + ReLU in one
+    kernel. Simpler than attention; lets us test fusion on a small
+    composite without the matmul complexity.
+  - **p302_rmsnorm**: simpler cousin of layernorm (no mean
+    subtraction). Likely Apple has it fused too — would be more
+    evidence-gathering for the thesis nuance.
+- The matmul ladder is closed; further Tier 3 work would be breadth
+  (conv2d, transpose) rather than depth.
+- Harness frictions STILL not addressed; bit p204 with the stability
+  threshold and continue to bite the "speedup vs MPS" interpretation
+  on any new op shape. Genuinely time to fix.
+- Phase 3 dry-run still pending. 24 problems is a respectable test
+  set for the LLM eval pipeline.
 
 ---
 
