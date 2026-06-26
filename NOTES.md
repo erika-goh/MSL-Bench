@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-26 — Tier 3: p201 manual-tile baseline, p202 matrix-unit closes 1.82× of the gap
+## 2026-06-26 — Tier 3: p201 baseline → p202 matrix unit → p203 staged+multitile, gap to MPS now ~1.5×
 
 Jumped from Tier 2 (reductions) to Tier 3 (tiled). One problem
 shipped: p201_matmul_tiled, a naive 16×16-tile kernel for square
@@ -138,21 +138,81 @@ re-orders the K-tile traversal — kept tolerance at atol=1e-2 anyway.
   collapsing to 0 would make the spec brittle to future kernels
   whose accumulation orders differ.
 
+### p203 matmul staged + multi-tile — two optimization layers, 1.62× over p202
+
+Combined two optimizations in one kernel:
+1. Each TG now produces a **16×16 patch of C** as four separate 8×8
+   matrix-unit tiles in registers (C_tl, C_tr, C_bl, C_br).
+2. The outer K-loop **stages a 32-deep slab of A and B into threadgroup
+   memory** once per K_STAGE=32 columns. The matrix unit reads operands
+   from TG memory in the inner K-loop.
+
+The two layers reinforce each other: staging without reuse would just
+shuffle bytes through TG memory for no gain, but with four output tiles
+sharing each staged A/B slab, every device load fans out across four
+matrix-unit ops. Per-output device reads drop from p202's ~256 to ~128.
+
+### The full Tier 3 picture now
+
+| problem | kernel_ms | speedup (steady MPS) | over previous |
+|---|---|---|---|
+| p201 naive 16×16 tiles | 3.00 | 0.29× | baseline |
+| p202 simdgroup matrix unit | 1.65 | 0.47× | 1.82× |
+| p203 staged + multi-tile | **1.02** | **~0.65×** | 1.62× |
+| MPS (steady) | ~0.66 | 1.00× | — |
+
+Three optimization steps; the gap closed from 3.5× down to ~1.5×.
+**Each step roughly doubled relative position vs MPS.** That ratio is
+worth noting — it suggests the optimization landscape here is fairly
+log-linear, not abruptly diminishing.
+
+### Two harness frictions that surfaced (still not blocking, but accumulating)
+
+1. **A/B/A stability threshold tripping on warm GPU.** First p203 run
+   measured 12% A/B/A delta and was flagged untrustworthy (threshold:
+   7%). Retry resolved it (delta dropped to 0.2%). Cause: we've been
+   running Tier 3 kernels in quick succession and the GPU warms up.
+   Real fix: either bump threshold to 10-15% with a "thermal warmup"
+   note, or run an untimed warmup dispatch before block 1.
+2. **MPS reference-time variance.** Across just the p203 retries the
+   reference bounced 0.66ms (steady) to 1.65ms (cold). Makes the
+   "speedup vs MPS" headline unreliable; the kernel's *own* time is
+   solid. Same shader-cache issue we documented for Tier 1.
+
+Both are well-known, both have known fixes, neither blocks any current
+problem from being measurable. Promoting them in priority though —
+the reference-warmup fix would let us cite a single honest MPS number
+per problem instead of a range.
+
+### Decisions made
+
+- Renamed "p203 staged" to actually combine staging with multi-tile,
+  because staging alone doesn't deliver the promised reuse. Spec
+  description was updated to be accurate to what the kernel does.
+- Did NOT bump the spec's A/B/A threshold to silence the false-positive
+  thermal alert. The threshold is doing its job; we just want to fix
+  the underlying measurement reliability separately.
+- Added a scaffold post-hoc (forgot it in the first commit). p203's
+  scaffold matters more than usual because the kernel is structurally
+  complex — LLMs being benchmarked on this problem need the framing
+  the scaffold provides.
+
 ### Carry into next session
 
-- **Ten problems total** (11 Tier 1, 8 Tier 2, 2 Tier 3 — wait,
-  Tier 1 is 11 with p009 deferred, so 11 + 8 + 2 = 21). Three Tier 3
-  candidates for next problem, each closing a different fraction of
-  the remaining MPS gap: staged loads, larger per-TG tile, or
-  double-buffered loads.
-- The reference-timing first-run penalty is now confirmed across
-  Tiers 1, 2, and 3. Worth promoting to a focused harness session
-  before the gap-closing variants are written, so their numbers are
-  honest.
-- The "matmul might be unbeatable" thesis is softening — going from
-  0.29× to 0.47× in one optimization step (p201 → p202) is a
-  significant chunk of the gap. Two more good optimization choices
-  might close the remaining distance.
+- **22 problems total** (11 Tier 1, 8 Tier 2, 3 Tier 3). Three real
+  MPS wins from Tier 2 still stand; the matmul ladder gets within
+  ~1.5× of MPS but hasn't crossed it.
+- Next Tier 3 candidate is **double-buffering** (overlap stage loads
+  with matrix-unit compute) — the remaining optimization axis after
+  staging and multi-tile. Last meaningful single-step gap-closer
+  available.
+- The harness frictions are escalating from "interesting" to "worth
+  a focused session": A/B/A stability threshold + MPS reference
+  warmup + tempfile cleanup. Together about 1–2 hours of focused
+  work. Probably worth doing before more Tier 3 comparisons.
+- We're at the right time to consider a Phase 3 dry-run — 22 problems
+  is plenty of variety to exercise the LLM eval pipeline. Could
+  even be next session if forward motion stalls on harness work.
 
 ---
 
