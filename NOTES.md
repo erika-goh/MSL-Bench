@@ -364,12 +364,92 @@ a blanket rule.
   steady-state is 0.92×; cold-start is a different (also real)
   measurement.
 
+### Harness fix — MPS compile-warmup prologue, and the speedup corrections it forces
+
+The MPS reference-warmup friction documented across the last two
+sessions finally got addressed. Root cause was visible in the code:
+the existing warmup loop exits when cumulative_ms >= warmup_ms_min
+(50ms), but the FIRST MPS call pays a 100–500ms compile cost on cold
+cache. So the budget tripped after exactly one call — leaving the 10
+timed samples in not-fully-warm state.
+
+Fix: three untimed throwaway calls before the timed-warmup loop. Forces
+shader compile and OS cache population BEFORE the budget starts ticking.
+
+Verified on p302 (worst-affected problem): reference variance dropped
+from 73% (cold/warm spread) to under 1%. Re-measured all key problems;
+several historical numbers shifted:
+
+| problem | speedup (was) | speedup (honest) | delta |
+|---|---|---|---|
+| p104 row_softmax | 1.09× | 1.08× | ~same (was stable) |
+| p201 matmul_tiled | 0.29× | 0.23× | partially-warm ref |
+| p202 matmul_simdgroup | 0.47× | 0.39× | partially-warm ref |
+| p203 staged + multitile | 0.65× | 0.65× | already stable |
+| p204 backfires | 0.45× | 0.45× | already stable |
+| p301 layernorm | 0.97× | 0.97× | already stable |
+| p302 fused_linear_relu | 0.92× / 1.55× | **0.55×** | substantial correction |
+
+The biggest correction: p302 dropped from "0.92× warm / 1.55× cold"
+to a clean 0.55× steady state. The "warm" reading we'd recorded was
+itself partially warm; only the compile-warmup prologue achieves
+fully-warm MPS. Implication for the fusion thesis: saving the ReLU
+dispatch (~250µs) doesn't recover our matmul deficit (our p202-style
+1.6ms vs MPS's 0.66ms). The fused-vs-not story collapses to "MPS
+matmul is fast enough that fusion-overhead savings are second-order."
+
+### Updated matmul ladder (honest numbers)
+
+| problem | kernel_ms | speedup | per-step |
+|---|---|---|---|
+| p201 naive 16×16 | 3.01 | 0.23× | baseline |
+| p202 matrix unit | 1.65 | 0.39× | 1.70× |
+| p203 staged+multi-tile | 1.02 | **0.65×** | 1.67× |
+| p204 backfires | 1.48 | 0.45× | 0.69× (LESSON) |
+
+Per-step improvement ≈1.7× as I'd previously claimed. The gap to MPS
+in absolute terms is wider than originally reported (we're at 0.65×
+of MPS, not 0.65× *of MPS-warm-cache-recorded-as-0.77ms*).
+
+### Updated fusion picture (honest numbers)
+
+| problem | speedup | what MPS does |
+|---|---|---|
+| p104 softmax | 1.08× | multi-dispatch, slow individual ops → we win |
+| p301 layernorm | 0.97× | fully fused, fast → we tie |
+| p302 fused_linear_relu | 0.55× | multi-dispatch but fast matmul → we lose |
+
+The thesis is now even more clearly conditional. With the variable
+"is MPS's individual op heavily tuned" controlled for, we see:
+
+- **MPS underinvested op** (softmax) → we win
+- **MPS already fused** (layernorm) → tie
+- **MPS multi-dispatch but BLAS-tuned** (linear+relu) → we lose because
+  the fast individual ops outpace our slower fused matmul
+
+### Decisions made
+
+- Did NOT update Tier 1 and Tier 2 timing numbers retroactively in
+  prior NOTES entries. The originals stand as the historical record;
+  this entry is the corrigendum.
+- Did NOT mirror the fix into the Swift runner. Candidate kernels
+  are AOT-compiled .metallib files, not lazily-compiled MPSGraph
+  shaders — they don't have the same warmup pathology.
+- compile_warmup_runs = 3 as default. Empirically sufficient on the
+  test set; small enough not to add measurable wall-clock overhead.
+
 ### Carry into next session
 
 - **25 problems total** (11 Tier 1, 8 Tier 2, 4 Tier 3, 2 Tier 4).
-  Four real MPS wins (p104, p106, p108, partial matmul ladder).
-  Tier 4 has two distinct shapes of result: tie (p301) and
-  warm/cold-asymmetric (p302).
+  Three real MPS wins (p104, p106, p108). Tier 4 has two distinct
+  shapes (tie, lose-on-matmul-deficit). Matmul ladder honest at
+  0.65× best vs MPS.
+- The honest fusion thesis: "fusion wins are real only when MPS's
+  individual ops are slow." When MPS's individual ops are well-tuned
+  (BLAS for matmul), our fusion overhead-savings can't recover the
+  per-op deficit. Worth foregrounding in the Phase 4 report.
+- Harness friction resolved. Future Tier 4 results will have
+  trustworthy steady-state numbers from the first run.
 - **Next Tier 4 candidates** (the place to keep pushing the thesis):
   - **p302_attention_head**: matmul + softmax + matmul, single
     kernel. MPS likely dispatches as 3 kernels (matmul, softmax,
