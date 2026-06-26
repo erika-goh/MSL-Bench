@@ -1,7 +1,7 @@
 # Project: mslbench — Metal KernelBench
 A benchmark for LLM-generated Metal compute kernels on Apple Silicon.
-The full plan is in metal-kernelbench-plan.md. Current phase: Phase 0
-(vertical slice — one problem end-to-end).
+Roadmap and phase status live in README.md's `## Roadmap` section —
+single source of truth, don't duplicate it here.
 
 ## Working style (important — this is a learning project)
 - I am using this project to learn Metal, Swift, and benchmark engineering.
