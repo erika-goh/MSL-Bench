@@ -100,6 +100,7 @@ def time_reference_mps(
     warmup_ms_max: float = 500.0,
     warmup_iter_max: int = 10_000,
     runs: int = 10,
+    compile_warmup_runs: int = 3,
 ) -> TimingStats:
     """Time the PyTorch reference on the MPS backend (wall clock + synchronize).
 
@@ -113,6 +114,19 @@ def time_reference_mps(
     def sync():
         if dev.type == "mps":
             torch.mps.synchronize()
+
+    # Compile-warmup prologue: MPS lazily compiles MPSGraph shaders on the
+    # first (op, shape) invocation. The compile cost (often 100-500ms) can
+    # exceed warmup_ms_min, causing the timed-warmup loop below to exit after
+    # exactly one call — leaving the 10 timed samples in transitional state
+    # rather than steady state. Three untimed throwaway runs here guarantee
+    # the shader is compiled and the OS-level cache is populated regardless
+    # of the warmup_ms budget. Discovered after p201/p203/p302 all showed
+    # wild ref_ms variance between processes.
+    for _ in range(compile_warmup_runs):
+        sync()
+        reference_fn(**t_inputs)
+        sync()
 
     # Time-based warmup: mirror of the Swift runner's warmup loop — same three
     # exit conditions, different timer source. Warmup samples are discarded.
