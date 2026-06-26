@@ -5,7 +5,7 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
-## 2026-06-26 — Tier 3 matmul ladder + Tier 4 opener (p301 layernorm), and the fusion thesis nuance
+## 2026-06-26 — Tier 3 matmul ladder, Tier 4 layernorm + fused_linear_relu, fusion thesis refined
 
 Jumped from Tier 2 (reductions) to Tier 3 (tiled). One problem
 shipped: p201_matmul_tiled, a naive 16×16-tile kernel for square
@@ -311,12 +311,65 @@ fusion), others will tie (where they didn't).
 - Did NOT chase the remaining 3% gap. The 0.97× number is the actual
   finding — adjusting the kernel further would muddy the data point.
 
+### p302 fused_linear_relu — Tier 4, and the warm/cold variance
+
+Built `out = relu(x @ w + b)` as a single kernel: p202-style matmul
+plus an epilogue (simdgroup_store to a TG tile, 32 threads each
+process 2 of 64 elements doing bias-add + ReLU + write). Kernel is
+rock-stable at 1.65ms. MPS reference, however, **varies between
+1.52ms (warm) and 2.63ms (cold)** — wider warm/cold spread than any
+problem we've measured so far.
+
+Three runs:
+
+| run | ref_ms | speedup | MPS state |
+|---|---|---|---|
+| 1 | 2.63 | 1.59× | cold |
+| 2 | 1.52 | 0.92× | warm |
+| 3 | 2.57 | 1.55× | cold-ish |
+
+Honest steady-state read: **0.92×** — we lose by 8% when MPS is
+fully warm. Honest cold-start read: **~1.55×** — we win 55% on
+first call.
+
+### Refined fusion thesis (4 data points now)
+
+| problem | speedup | what MPS does |
+|---|---|---|
+| p104 softmax | 1.09× | multi-dispatch (always slow) |
+| p301 layernorm | 0.97× | fully fused (always fast) |
+| p302 fused_linear_relu (warm) | 0.92× | multi-dispatch (fast when warm) |
+| p302 fused_linear_relu (cold) | 1.55× | multi-dispatch (slow when cold) |
+
+Three different MPS implementation profiles surface:
+
+1. **Always-slow multi-dispatch** (softmax) — we win uniformly.
+2. **Already-fused** (layernorm) — we tie.
+3. **Warm-fast / cold-slow multi-dispatch** (linear+relu) — we lose
+   steady-state, win cold-start.
+
+This is much richer than the project's initial naïve "fused beats
+dispatched" framing. The benchmark catalog now distinguishes these
+profiles, which means Phase 4 analysis can talk about *which kinds
+of composites are worth fusing in user code* rather than asserting
+a blanket rule.
+
+### Decisions made
+
+- Used p202's matmul (simple 8×8 per TG, no staging) rather than
+  p203's optimized version, to keep the kernel focused on the
+  fusion content rather than matmul-perf layering. A staged
+  fused_linear_relu would be a follow-up problem if needed.
+- Did NOT chase the cold-start "win" as a real speedup. The honest
+  steady-state is 0.92×; cold-start is a different (also real)
+  measurement.
+
 ### Carry into next session
 
-- **24 problems total** (11 Tier 1, 8 Tier 2, 4 Tier 3, 1 Tier 4).
-  Four real MPS wins from earlier (p104, p106, p108, partial matmul
-  ladder); p301 is a clean tie. The fusion thesis is now nuanced
-  rather than naïve.
+- **25 problems total** (11 Tier 1, 8 Tier 2, 4 Tier 3, 2 Tier 4).
+  Four real MPS wins (p104, p106, p108, partial matmul ladder).
+  Tier 4 has two distinct shapes of result: tie (p301) and
+  warm/cold-asymmetric (p302).
 - **Next Tier 4 candidates** (the place to keep pushing the thesis):
   - **p302_attention_head**: matmul + softmax + matmul, single
     kernel. MPS likely dispatches as 3 kernels (matmul, softmax,
