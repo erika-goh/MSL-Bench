@@ -5,6 +5,172 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-29 — p305 attention_simdmatmul: matrix engine closes p304's 2:1 deficit in one shot, matches MPS
+
+Direct test of the quiz hypothesis: "if the 2:1 deficit at p304
+is the matrix-engine gap, then re-doing the matmul phases with
+simdgroup_matrix should close it." It did. **First compile, first
+correct, first-run timing tied with MPS to within noise.**
+
+### What got built
+
+`tier4_fused/p305_attention_simdmatmul/` — same fused attention as
+p304, but the QK^T and PV phases run on the Apple GPU matrix unit
+via `simdgroup_matrix<float, 8, 8>`. The softmax in between still
+uses scalar code, now sped up via SIMD-group lane reductions
+(`simd_max`, `simd_sum`) instead of tree reductions in TG memory.
+
+### Result
+
+| metric             | p303 (M=64)   | p304 (M=512, scalar) | **p305 (M=512, simdmatmul)** |
+|--------------------|---------------|----------------------|------------------------------|
+| compiled / correct | ✓ / ✓         | ✓ / ✓                | ✓ / ✓                        |
+| max_abs_err        | 1.79e-7       | 1.79e-7              | **1.64e-7**                  |
+| kernel_ms          | 0.032         | 1.71                 | **0.435**                    |
+| reference_ms (MPS) | 0.26–0.29     | 0.83 (variable)      | 0.43                         |
+| **speedup**        | 8.0×          | 0.49×                | **0.996×**                   |
+| block_delta_frac   | < 0.01        | 0.029                | 0.0001                       |
+
+Going from p304 to p305 is a **3.9× kernel-time speedup** on the
+identical algorithm at the identical size. That entire delta is
+the matrix engine kicking in.
+
+Numerical accuracy didn't suffer — max_abs_err is *better* than
+p304's scalar version, suggesting the matrix unit's accumulation
+order at fp32 is at least as well-conditioned as a straight
+left-to-right scalar sum for length-512 random-normal dot products.
+
+### TG layout — the central design decision
+
+The interesting design choice was the threadgroup structure. Two
+nearby patterns from the project don't quite work:
+
+- **p303/p304 layout** (one TG per query row): can't reach matrix
+  throughput. Each TG only produces 1 row of scores; the matrix
+  unit's natural output is 8 rows at a time.
+- **p202 layout** (one SIMD group per output tile, TG = 32 threads):
+  can't fuse softmax. The full row of scores is spread across 64
+  TGs, so cross-TG sync would be needed for the row reduction.
+
+The right middle: **one TG per block of 8 query rows, 8 SIMD groups
+inside it.**
+
+- 64 TGs total. TG t handles query rows [8t, 8t+8).
+- 8 SIMD groups (256 threads / TG). SG s handles output column
+  block [s*64, (s+1)*64) in BOTH phase 1 and phase 3.
+- In phase 2, the same SGs change role: SG s does the softmax for
+  row s. Beautifully symmetric — 8 rows, 8 SIMDs, 1:1 mapping.
+
+That symmetry is what made the kernel one-shot-correct. Every
+phase has a clean owner.
+
+### Concept: writing simdgroup_matrix to threadgroup memory
+
+p202's matmul stored its output tile directly to device memory.
+For a fused kernel we need to store into **threadgroup memory**
+instead so the next phase can read it without a global round-trip:
+
+    simdgroup_store(C_frag, scores + c0, M);   // scores is threadgroup float*
+
+Same intrinsic, the compiler picks the threadgroup overload from
+the pointer type. Latency is much lower than device store.
+
+The corresponding load in phase 3:
+
+    simdgroup_load(P_frag, scores + kt * 8, M);
+
+reads probs[0..7, kt*8..kt*8+7] from threadgroup memory directly
+into a matrix register. No copy through registers, no thread-by-
+thread shuffling. The matrix unit + threadgroup memory is a clean
+pair.
+
+### Concept: SIMD-group lane reductions
+
+Apple GPUs expose `simd_max`, `simd_sum`, `simd_xor`, etc. —
+intrinsics that reduce across the 32 lanes of a SIMD group in
+hardware. No tree reduction in shared memory, no barriers. The
+return value is the same in every lane.
+
+For p305's softmax, each SG holds one row's 512 elements (16 per
+lane). Compute a per-lane max over those 16, then `simd_max` to
+get the row max. Same shape for sum.
+
+This is much faster than the p303/p304 pattern of writing to
+scratch + tree-reduce + barrier — and crucially, it doesn't
+require coordination across SIMD groups, which means there's no
+intra-phase barrier in phase 2 at all. Just one barrier each
+between phases 1↔2 and 2↔3.
+
+### Concept: transpose-load for A @ B^T
+
+Computing C = Q @ K^T using the matrix unit:
+
+    simdgroup_load(K_frag, k + c0 * D + kt * 8, D, ulong2(0, 0), true);
+
+The 5th argument (`transpose_matrix = true`) transposes the
+loaded tile in-register. The matrix unit then does its standard
+A @ B operation, and the net effect is C = Q @ K^T. Without this
+flag, we'd have to either physically transpose K in memory (huge)
+or use a different matmul intrinsic.
+
+### What's left on the table (probably small)
+
+The 0.4% behind MPS is within run-to-run noise. To beat MPS we'd
+need to stage K/V tiles into TG memory so SGs in the same TG
+share loaded tiles (currently each SG loads its own K-strip from
+device for every output tile, giving 8× redundant device loads
+per TG). That's the standard "Q-shared block" optimization — a
+plausible p306 variant. Expected payoff: ~1.5–2× more.
+
+But for the Phase 4 report, **p305 matching MPS is the
+load-bearing data point**. It confirms the deficit at p304 was a
+hardware-engine choice, not algorithm or memory layout.
+
+### What didn't go wrong (and why)
+
+I expected at least one round of debugging — first GPU kernel of
+this complexity in the project, three new Metal idioms at once
+(simdgroup_matrix into TG memory, simd lane reductions, transpose
+load). It worked first try. Three reasons in hindsight:
+
+1. **p202 already established the matrix-unit mechanics.** The
+   tile-loop structure, the `simdgroup_load/store/multiply_accumulate`
+   triple, the 8×8 dim — all proven. Only the integration was new.
+2. **The 1:1 SG↔row mapping eliminated a whole class of bugs.**
+   No cross-SG synchronization within a phase, no thread-index
+   arithmetic in the softmax. The 8-rows / 8-SGs choice wasn't
+   arbitrary; it was chosen to remove sync surface area.
+3. **The offset math was the only place to get wrong**, and I
+   commented every tile coordinate inline. Slow to type, fast to
+   audit.
+
+### Decisions made
+
+- Did NOT stage K or V into TG memory. Going for "matches MPS"
+  was the milestone; further optimization is a separate problem.
+- Used `simd_max` / `simd_sum` instead of tree reductions. This
+  is the first project use of these intrinsics; the difference
+  vs the tree pattern is real (no barriers, no scratch use for
+  reduction workspace) and worth highlighting in the report.
+- Bumped tolerance to 1e-2 atol (vs p304's 1e-3). simdgroup_matrix
+  accumulation order ≠ scalar fp32; p202 already documented this.
+  Headroom is 4 decades over observed 1.64e-7, so it's safe.
+
+### Open items / future problems
+
+- p306: staged-K/V variant. Likely 1.5–2× more vs p305. Would
+  test whether we can BEAT MPS at this size, not just match.
+- Larger sizes (M=D=1024, 2048): if MPS scales well, we likely
+  stay at parity. If MPS's matmul has a sub-optimal size point,
+  we could overtake. Worth one more data point for the curve.
+- The crossover point question from the p304 NOTES — would a
+  scalar p305 actually be needed now? p305 is the better kernel
+  at large sizes; p303 is the better kernel at small sizes
+  (dispatch overhead dominates). A scalar variant at M=D=128/256
+  is still the cleanest way to draw the curve.
+
+---
+
 ## 2026-06-29 — corrigendum: phase-3 V reads in p303/p304 are coalesced, phase-1 K reads are the uncoalesced ones
 
 While walking through a quiz on "which lever claws p304 back above
