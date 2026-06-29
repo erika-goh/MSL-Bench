@@ -24,8 +24,10 @@
 // once at the top so phase 1's dot product reads it from threadgroup
 // memory rather than re-reading device memory.
 //
-// V is read directly from device in phase 3 (uncoalesced reads —
-// future variant could stage V into threadgroup memory).
+// K is read from device with an UNCOALESCED across-threads pattern
+// in phase 1 (stride D between adjacent threads) — the real bandwidth
+// cost of this kernel. V reads in phase 3 are coalesced (adjacent
+// threads read adjacent columns of the same row).
 
 #include <metal_stdlib>
 using namespace metal;
@@ -137,9 +139,10 @@ kernel void attention_head(
     //   }
     //   out[m * D + tid] = o;
     //
-    // V access at fixed j: stride-D between adjacent threads → uncoalesced
-    // device reads. Acceptable for the baseline; staging V into
-    // threadgroup memory would be the next optimization.
+    // V access at fixed j: stride-1 between adjacent threads → COALESCED
+    // (thread t reads v[j*D + t], adjacent columns of the same row).
+    // No bandwidth issue here. The uncoalesced pattern in this kernel
+    // is phase 1's K reads, not phase 3's V reads.
     // ============================================================
 
 

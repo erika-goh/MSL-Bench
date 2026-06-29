@@ -28,7 +28,9 @@
 // Differences from p303 to watch:
 //   - dot products are length 512 instead of 64 (8× per-thread compute)
 //   - tree reduction is 9 levels deep instead of 6
-//   - V reads in phase 3 are stride-512 → uncoalesced at a bigger stride
+//   - phase 1 K reads are uncoalesced across threads at a stride of 512
+//     (vs 64 in p303) → the actual bandwidth cost. Phase 3 V reads are
+//     coalesced (stride-1 across threads), same as p303.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -128,9 +130,9 @@ kernel void attention_large(
     //   }
     //   out[m * D + tid] = o;
     //
-    // At D=512 the stride-D V reads are 4× the stride of p303 — this
-    // is a known cost the baseline accepts; a staged-V variant would
-    // be a separate problem.
+    // V access at fixed j is stride-1 across threads → COALESCED.
+    // (The uncoalesced reads in this kernel are phase 1's K reads,
+    // not these V reads.)
     // ============================================================
 
 

@@ -32,8 +32,11 @@ kernel void attention_head(
 
     // ---------- phase 1: scores ----------
     // Thread tid computes s[tid] = (Q[m] · K[tid]) * SCALE.
-    // Q row read from threadgroup (broadcast across threads);
-    // K row read from device (one row per thread, sequential per thread).
+    // Q row read from threadgroup (broadcast across threads).
+    // K row read from device: sequential WITHIN a thread (good for that
+    // thread's prefetch), but UNCOALESCED across adjacent threads — at
+    // fixed d, thread t reads k[t*D + d] so neighbours are D=64 floats
+    // apart. The real per-byte bandwidth cost of this kernel lives here.
     float s = 0.0f;
     for (uint d = 0; d < D; d++) {
         s += q_row[d] * k[tid * D + d];
@@ -81,8 +84,9 @@ kernel void attention_head(
 
     // ---------- phase 3: output ----------
     // Thread tid computes out[m, tid] = sum_j scratch[j] * V[j, tid].
-    // V reads are stride-D across threads at a single j → uncoalesced,
-    // but small enough at D=64 not to dominate.
+    // V reads are stride-1 across threads at fixed j (thread t reads
+    // v[j*D + t], i.e. adjacent columns of the same row) → COALESCED.
+    // No bandwidth issue here.
     float o = 0.0f;
     for (uint j = 0; j < M; j++) {
         o += scratch[j] * v[j * D + tid];

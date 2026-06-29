@@ -46,9 +46,14 @@ PROBLEM = {
         "max-reduce → sum-reduce → probs, plus q_row[D] staged once. "
         "Threadgroup memory used: 2·M·4 = 4 KB (well under the 32 KB "
         "budget). Reduction tree depth grows from 6 (p303) to 9 levels. "
-        "Phase-3 V reads are still uncoalesced (stride-D across threads "
-        "at fixed j); at D=512 this may bite harder than at D=64 — a "
-        "future staged-V variant could test that."
+        "Inherits p303's actual coalescing profile (corrected after "
+        "p303's original docs flipped it): phase 1 K reads are "
+        "UNCOALESCED across adjacent threads (stride D=512 between "
+        "them at fixed d — far worse than p303's stride-64); phase 3 "
+        "V reads are COALESCED (adjacent threads read adjacent columns "
+        "of the same V row). The most leveraged optimization here is "
+        "simdgroup-matrix matmul on the QK^T and PV phases — a future "
+        "p305 variant."
     ),
 }
 

@@ -46,9 +46,13 @@ PROBLEM = {
         "reduce), then normalized probabilities (phase 3). Five "
         "barriers total. q_row is staged once at the top so phase 1's "
         "dot product reads it from threadgroup memory; K is read "
-        "directly from device (one row per thread, coalesced within "
-        "the row); V is read directly from device in phase 3 "
-        "(uncoalesced — leaves room for a staged-V follow-up problem)."
+        "directly from device — sequential within each thread's row, "
+        "but UNCOALESCED across adjacent threads (stride D between them "
+        f"at fixed d, so {_M}/32 SIMD groups each do 32 separate cache-"
+        "line loads). V is read directly from device in phase 3 and is "
+        "coalesced (adjacent threads read adjacent columns of the same "
+        "row). A future variant that stages K — or transposes its access "
+        "pattern — would address the real bandwidth cost here."
     ),
 }
 
