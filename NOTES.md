@@ -5,6 +5,118 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-29 — p304 attention_large: same kernel, M=D=512 → 0.49×, the other end of the curve
+
+Follow-up to p303 within the same session. Last entry's open
+item was: "A future problem at M = D = 512 or 1024 would show the
+same kernel hitting its compute-bound regime and the speedup
+shrinking. Worth doing next session for the report." This
+delivers exactly that.
+
+### What got built
+
+`tier4_fused/p304_attention_large/` — a literal copy of the p303
+algorithm with three constants changed (M, D, SCALE) and the
+launch config rescaled. No algorithmic change. No new Metal
+concepts. The point of the problem is the *measurement*, not the
+kernel.
+
+- 512 TGs × 512 threads/TG = 262144 total threads
+- Threadgroup memory: 2 × 512 × 4 = 4 KB (still well under 32 KB)
+- Reduction tree depth: 6 → 9 levels (M halves three more times)
+- Dot products in phase 1 and phase 3 each grow from length 64 to
+  length 512 (8× per-thread compute)
+
+### Result — predicted regime inversion
+
+| metric                       | p303 (M=D=64) | p304 (M=D=512) |
+|------------------------------|---------------|-----------------|
+| compiled / correct           | true / true   | true / true     |
+| max_abs_err                  | 1.79e-7       | **1.79e-7**     |
+| kernel_ms                    | 0.032         | 1.71            |
+| reference_ms (MPS wallclock) | 0.26–0.29     | 0.83            |
+| **speedup**                  | **~8×**       | **0.49×**       |
+
+The max_abs_err is **bit-identical** between the two — fp32 reductions
+at length 512 with random-normal data did not eat into the precision
+budget the way I expected. Tolerance 1e-3/1e-3 has 5 decades of
+headroom either way.
+
+### Why the regime inverted (this is the actual lesson)
+
+Compute scaled ~500× (M·M·D went from 0.5M ops to 134M).
+Our kernel scaled **53×** in wall time (sublinear, because launch
+overhead is amortized across more work now).
+MPS scaled **3×** in wall time (essentially constant compute time
+plus a fixed multi-dispatch tax that didn't grow).
+
+> The 8× win at p303 was MPS's dispatch overhead, made visible by a
+> problem too small to hide it. At p304 the dispatch tax is invisible
+> against MPS's BLAS-tuned matmul, and our naive
+> one-thread-per-output-element dot product loses to it 2:1.
+
+The crossover (where our kernel matches MPS) is roughly where
+compute time ≈ MPS's dispatch overhead — somewhere around M=D≈200
+by linear interpolation in log space. Not measured; not worth
+measuring just to draw the curve smoother.
+
+### The fusion thesis now has a curve, not just points
+
+| problem | speedup | regime |
+|---|---|---|
+| p303 attention_head (M=D=64)    | **8.0×** | dispatch-overhead dominated |
+| p104 row_softmax                | 1.08×    | mixed |
+| p301 layernorm                  | 0.97×    | MPS already fused |
+| p302 fused_linear_relu          | 0.55×    | MPS BLAS-tuned matmul |
+| p304 attention_large (M=D=512)  | **0.49×**| compute-bound; MPS matmul wins |
+
+p303 and p304 are the same kernel, two different sizes, two
+different regimes. That's the cleanest possible illustration that
+"fusion wins" is conditional on problem size relative to dispatch
+overhead. For the Phase 4 report, this pair carries the argument
+on its own — no other annotation needed.
+
+### Concept: a single algorithm can be on either side of a perf crossover
+
+I keep tripping over this — "is our kernel fast?" is not a
+property of the kernel alone. It's a property of (kernel,
+problem size, baseline implementation, dispatch model). p303 and
+p304 share *everything* except size, and one is 8× faster while
+the other is 2× slower. That's not 16× of kernel skill — it's
+the baseline's fixed costs being divided by different amounts of
+real work.
+
+**One-sentence frame:** for any fused candidate, dispatch overhead
+is a constant *bonus* and compute efficiency is a *ratio*; whichever
+dominates depends on problem size, not on how good your code is.
+
+### Decisions made
+
+- Did NOT try to optimize p304. The 0.49× is the *data*. A
+  SIMD-group matmul variant or a staged-V variant might claw it
+  back, but those would be separate problems showcasing different
+  techniques. p304's job is to be the boring twin of p303.
+- Kept the kernel literally identical in structure. Resisted the
+  temptation to refactor the shared body into an included header
+  — the visual diff of *only constants changed* is itself the
+  pedagogical point.
+
+### Open items (carry forward)
+
+- The implied crossover point (~M=D≈200) is interpolated, not
+  measured. A p305 at M=D=128 or 256 would draw the actual curve
+  if the report wants one.
+- p304's phase-3 V reads are still uncoalesced. A staged-V
+  variant would test how much of the 2:1 deficit is uncoalesced
+  reads vs naive matmul. Probably mostly the latter, but
+  unmeasured.
+- The "MPS dispatch overhead ≈ 250 µs total" estimate from p303
+  is now reinforced: p304's reference_ms = 0.83 ms includes that
+  same ~0.25 ms tax plus ~0.58 ms of actual compute. Three
+  dispatches, ~0.19 ms each — consistent.
+
+---
+
 ## 2026-06-29 — p303 attention_head: biggest MPS win in the project (~8×), fusion thesis at its sharpest
 
 User filled in the p101 scaffold themselves to grok the workflow,
