@@ -5,6 +5,145 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-29 — p306 attention_qstaged: Q-staging buys 6%, not 64× — L1 was already doing the work
+
+Sequel to p305. Quiz argument said Q has 64× redundancy within
+a TG and staging it should help. p306 implements exactly that.
+The empirical answer is **~6%**, not 64× — the L1 cache was
+absorbing nearly all of the redundancy in p305.
+
+### What got built
+
+`tier4_fused/p306_attention_qstaged/` — p305 with a single
+algorithmic change:
+
+- New TG memory buffer `q_stage[8 × 512]` = 16 KB.
+- At the top of the kernel, 256 threads cooperatively load
+  Q[m_base..m_base+7, :] into `q_stage` (16 elements per thread,
+  coalesced strides across SIMD-group lanes).
+- One `threadgroup_barrier`.
+- Phase 1's Q load changed from
+  `simdgroup_load(Q_frag, q + m_base*D + k_off, D)` to
+  `simdgroup_load(Q_frag, q_stage + k_off, D)`.
+- Phases 2 and 3 unchanged.
+
+TG memory: 16 KB scores + 16 KB Q-stage = **32 KB**, at Apple's
+per-TG cap.
+
+### Result — small win, but a real one
+
+Warm-state, interleaved measurements (back-to-back to keep MPS
+state comparable):
+
+| metric                       | p305 (no stage) | p306 (Q staged) |
+|------------------------------|-----------------|-----------------|
+| compiled / correct           | ✓ / ✓           | ✓ / ✓           |
+| max_abs_err                  | 1.64e-7         | **1.64e-7**     |
+| kernel_ms (warm)             | 0.3177          | **0.2994**      |
+| reference_ms (warm MPS)      | 0.4499          | 0.4608          |
+| speedup vs MPS (warm)        | 1.41×           | **1.54×**       |
+| block_delta_frac (warm)      | 0.001           | 0.001           |
+
+**Kernel speedup from staging: 5.8%.** A real but modest win.
+
+### Why the prediction was off by ~10× — the L1 lesson
+
+The quiz analysis counted 64 redundant loads of each Q element
+per TG. That counts *requests* to the memory subsystem, not
+*device traffic*. Apple's L1 cache sits between SGs and the
+device. When SG s loads Q[m_base..+7, kt*8..+7] and then SG t in
+the same TG loads the same tile microseconds later, the load
+hits L1, not device DRAM. The "redundancy" only translates to
+latency at the L1 access level — not the DRAM bandwidth level.
+
+The 6% remaining is L1's own access cost (still nonzero — it's
+a load that has to be issued, decoded, and pipelined) and any
+spillover at the cache eviction boundary.
+
+**One-sentence frame:** *for caches with reuse-friendly access
+patterns, redundancy in load count overstates the actual cost
+proportional to the cache hit rate.* The Q access pattern in
+p305 is maximally cache-friendly (same tile reloaded immediately
+in the next inner-loop iteration), so almost all the
+"redundancy" was free.
+
+### Warm vs cold variance — the other story this run
+
+While running the comparison I got two artifacts worth keeping:
+
+1. **First p306 run was cold.** block1 = 0.42 ms, block3 = 0.30
+   ms — a 29% delta. The harness correctly threw a stability
+   error: `timing_trustworthy: false`. The GPU was thermally
+   idle from the previous quiz break and took ~3 timing
+   iterations to ramp to high-perf state. Re-running with the
+   GPU already warm gave the clean 0.30 ms reading.
+2. **Steady-state speedup vs MPS is much higher than p305's
+   first-shot reading.** p305's "0.996× MPS, tied with the
+   reference" reading two sessions back was a cold-MPS artifact
+   (MPS's first dispatch had launch overhead). In steady state,
+   p305 is **1.41× MPS**, p306 is **1.54× MPS**. Both
+   meaningfully beat MPS once the system is warm.
+
+Lesson: report-time, we need to be explicit about which state
+the speedup is measured in. The honest framing for the Phase 4
+report is something like:
+
+> p305: tied with MPS on a cold first call (0.996×), 1.4× faster
+> in warm steady state.
+
+Neither number is "wrong" — they answer different questions
+("what does the first dispatch cost?" vs "what does a sustained
+workload deliver?"). The benchmark already records both
+implicitly via the block1/block3 medians.
+
+### Why p306 starts colder than p305
+
+A small observation worth checking later: p306 needed more
+warmup iterations than p305 to reach steady state. Plausible
+cause: p306 requests 32 KB of TG memory vs p305's 16 KB. On
+Apple Silicon, threadgroup-memory pressure can lower occupancy
+(how many TGs can fit on one core simultaneously), which means
+fewer concurrent TGs to hide latency early in the launch. Once
+the work queue is full it doesn't matter, but at startup with a
+cold GPU, lower occupancy means a longer ramp.
+
+Not actionable as a fix — it's a tradeoff inherent to staging.
+Worth noting.
+
+### Decisions made
+
+- Did NOT also restructure to share K across SGs (the "p306 plus"
+  option the user passed on). The single-variable change isolates
+  the Q-staging effect cleanly. The fact that it's only 6%
+  suggests further effort here has diminishing returns — the
+  remaining gap to a fully-optimized kernel is probably 20–30%
+  at best, and would require non-trivial restructure.
+- Kept the same launch geometry, scratch layout, softmax, and
+  PV phase as p305. The diff between the kernels is small enough
+  that the result is *cleanly attributable* to Q-staging alone.
+- Did NOT bump the harness's warmup count to absorb the cold-GPU
+  ramp. The stability_error caught the problem honestly and
+  re-running with a warm GPU gave a clean reading.
+
+### Open items / carry forward
+
+- **Cold-state benchmarking is its own measurement question.**
+  The harness's A/B/A check is doing its job (catching cold-GPU
+  bias), but doesn't smoothly handle "the kernel needs more
+  warmup at higher TG-memory pressure." Bumping warmup count is
+  a band-aid; better would be a "ramp until block1≈block3"
+  prologue, which is a Phase-1-timing-trust task we punted on.
+- **The full-restructure p307 (shared K + Q-stage) would test
+  whether the remaining 30% gap is closeable** without giving up
+  much TG memory. Expensive to write; small expected payoff.
+  Probably not worth doing unless we want a "best-case fully-
+  optimized attention" data point for the report.
+- **The Phase 4 report needs an explicit cold/warm framing.**
+  We have enough data now to characterize both regimes for
+  every Tier 4 problem — worth a section.
+
+---
+
 ## 2026-06-29 — p305 attention_simdmatmul: matrix engine closes p304's 2:1 deficit in one shot, matches MPS
 
 Direct test of the quiz hypothesis: "if the 2:1 deficit at p304
