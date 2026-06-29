@@ -5,6 +5,107 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-29 — p205 transpose: first non-matmul Tier 3 problem, 4× MPS at 2048²
+
+After scoping discussion concluded we should target ~40–45
+strategically chosen problems rather than literally 60, I picked
+the highest-leverage gap to fill first: **Tier 3 had four problems
+and all four were matmul variants.** First non-matmul Tier 3
+problem lands.
+
+### What got built
+
+`tier3_tiled/p205_transpose/` — tiled transpose at M=N=2048.
+Each TG handles a 16×16 block of A, stages it through 1 KB of
+threadgroup memory, and writes the transposed result to B with
+coalesced stores. 16384 TGs × 256 threads = 4M total threads,
+one per input element.
+
+### Result — clean win over MPS
+
+| metric | warm run 1 | warm run 2 |
+|---|---|---|
+| compiled / correct | ✓ / ✓ | ✓ / ✓ |
+| max_abs_err | **0.0** | **0.0** |
+| kernel_ms | 0.1212 | 0.1173 |
+| reference_ms (MPS) | 0.5022 | 0.4898 |
+| **speedup** | **4.14×** | **4.18×** |
+
+Bit-exact (no arithmetic, just memory movement). Consistently
+~4× faster than MPS across both warm runs.
+
+### Why we beat MPS on something this simple
+
+The kernel is tiny — read, barrier, write — but MPS's transpose
+likely goes through a general-purpose path that handles arbitrary
+shapes, dtypes, and non-contiguous strides. Our kernel is
+specialized:
+
+1. **Shape compile-time known** (M=N=2048). MPS does runtime
+   dispatch.
+2. **Single dtype** (fp32). MPS supports more.
+3. **Always-contiguous outputs.** MPS supports views/strides.
+4. **Optimal tile size baked in.** MPS picks tile size based on
+   heuristics that don't know our exact shape.
+
+This is a data point worth keeping for the Phase 4 report: for
+**memory-bound ops with small specialization wins**, hand-tuned
+kernels can decisively beat MPS even at "trivial" tasks. The
+opposite of the matmul story where MPS's BLAS tuning dominates.
+
+### Concept: coalesced writes (first appearance as the primary motivation)
+
+The naïve thread-per-element transpose has the opposite of
+phase-3 V reads from p305:
+
+    b[j * M + i] = a[i * N + j];
+
+Adjacent threads (varying `j`) read **adjacent A addresses** → one
+cache-line load per SIMD-group row. But they write **B addresses
+M floats apart** → 32 separate cache-line writes per SIMD-group
+store. Catastrophic on a memory-bound kernel.
+
+The tiled fix stages A into threadgroup memory in natural order,
+then writes B with **swapped** indices on the TG read but the
+same coalesced pattern on the B write:
+
+    tile[ty][tx] = a[(by*TILE + ty) * N + bx*TILE + tx];  // coalesced A read
+    barrier;
+    b[(bx*TILE + ty) * M + by*TILE + tx] = tile[tx][ty];  // coalesced B write
+
+The "uncoalesced" access has been pushed into the TG-memory
+read (`tile[tx][ty]`), where it doesn't matter because TG memory
+is fast for that scale.
+
+This is the cleanest possible illustration of the
+across-threads-at-one-instant rule from the corrigendum notes.
+The transpose problem is canonical for teaching it because
+naïveté here costs you nothing on reads and everything on writes.
+
+### LLM-eval implications
+
+This is exactly the kind of problem where I expect models to
+**produce CUDA-like code that compiles in Metal but has
+uncoalesced writes**. The naive port is easy and runs. The
+tiled fix requires either Metal-specific knowledge or a transfer
+of the CUDA bank-conflict pedagogy. Worth watching closely in
+Phase 3 evals.
+
+### Decisions made
+
+- Used the simplest tiled approach. Did NOT add the +1 padding
+  to `tile[TILE][TILE+1]` that NVIDIA tutorials recommend for
+  bank-conflict avoidance — Apple's threadgroup memory has a
+  different bank structure and we'd need empirical evidence the
+  padding helps here before adopting the pattern. A future p206
+  could test it.
+- Did NOT add a non-square shape variant. Square is enough for
+  the headline data point.
+- Set `tolerance.rtol = 0.0` — bit-exact is achievable for pure
+  data movement and we got it.
+
+---
+
 ## 2026-06-29 — p306 attention_qstaged: Q-staging buys 6%, not 64× — L1 was already doing the work
 
 Sequel to p305. Quiz argument said Q has 64× redundancy within
