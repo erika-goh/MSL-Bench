@@ -5,6 +5,121 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-29 — p303 attention_head: biggest MPS win in the project (~8×), fusion thesis at its sharpest
+
+User filled in the p101 scaffold themselves to grok the workflow,
+then we returned to building. The natural next problem was the
+fusion thesis's biggest stake: a single-kernel attention head.
+
+### What got built
+
+Single-head scaled dot-product attention fully fused in one kernel:
+
+  out = softmax(Q · K^T / sqrt(D)) · V
+
+Shape M = D = 64 (sequence length × head dimension). One TG per
+query row (64 TGs), 64 threads per TG, every phase has a clean
+1:1 thread-to-work mapping. Five phases share one scratch[M]
+array (scores → reduction workspace → probabilities), with
+barriers at every transition. Q row staged into a small q_row[D]
+buffer for broadcast reuse. K read directly from device (one row
+per thread, row-internal reads are sequential). V read directly
+from device in phase 3 (uncoalesced — staging would be a future
+problem).
+
+The kernel subsumes nearly every concept from earlier tiers:
+threadgroup memory, tree reductions (twice — once for max, once
+for sum), softmax with max-subtract stability, scratch reuse with
+careful barriers, dot products. Building it required NO new
+concepts — just composition of existing ones.
+
+### Result — best speedup in the project by far
+
+| metric | value |
+|---|---|
+| compiled | true (no warnings) |
+| correct | true |
+| max_abs_err | 1.79e-7 (~1 ULP) |
+| kernel_ms | 0.032 (rock-solid across runs) |
+| reference_ms | 0.26 – 0.29 (some noise on these microsecond scales) |
+| **speedup** | **~8×** vs MPS |
+
+Previous best was p108 row_argmax at 2.16×. This is roughly 4× more
+dramatic.
+
+### Why the 8× is real but context-dependent
+
+The actual compute is tiny: M·M·D + M·M·D + M·M ≈ 530K float ops,
+which executes in ~30µs on our throughput. MPS dispatches attention
+as at least three kernels (matmul, softmax, matmul). Each dispatch
+has ~80–100µs of launch overhead on macOS. **Three dispatches ≈
+250µs of overhead, which roughly matches MPS's 260–290µs total time.**
+
+Our 1-dispatch kernel pays launch overhead once. The 8× win is
+essentially the dispatch-overhead difference, magnified by the small
+problem size where compute can't amortize the multi-dispatch cost.
+
+**Critical caveat for the report**: at production attention shapes
+(M = D = 512 or 2048), compute time grows as M·M·D while dispatch
+overhead stays constant. The fusion advantage shrinks proportionally.
+At M = D = 2048 the speedup would be much closer to 1×, possibly
+even below it if our matmul deficit (from Tier 3) dominates.
+
+The 8× here is **honest at this size**, not a general claim about
+attention. The benchmark catalog should ideally include attention at
+multiple sizes to show the curve — flagging that as a future problem.
+
+### The complete fusion picture, 5 data points across Tiers 2 and 4
+
+| problem | speedup | MPS implementation profile |
+|---|---|---|
+| p303 attention_head | **~8×** | multi-dispatch, dispatch overhead dominates |
+| p104 softmax | 1.08× | multi-dispatch, individual ops slow |
+| p301 layernorm | 0.97× | fully fused already |
+| p302 fused_linear_relu | 0.55× | multi-dispatch but BLAS-tuned matmul |
+
+Four distinct outcomes, four distinct underlying causes. The
+benchmark now exercises essentially the full space of fusion
+opportunities. The Phase 4 report will have a much richer story
+than "fusion wins" or "fusion doesn't matter":
+
+> Fusion wins are real but their magnitude depends on (a) how many
+> dispatches MPS uses for the composite, (b) how fast MPS's individual
+> kernels are, (c) the size of the problem relative to dispatch
+> overhead, and (d) whether the candidate's own per-op cost is
+> competitive with MPS's tuned versions.
+
+### Decisions made
+
+- Used M = D = 64 to get the maximum dispatch-overhead win. A future
+  problem at M = D = 512 or 1024 would show the same kernel hitting
+  its compute-bound regime and the speedup shrinking. Worth doing
+  next session for the report.
+- Did NOT stage V into threadgroup memory. Phase 3 reads are
+  uncoalesced. Acceptable for the baseline; saves complexity. The
+  staged variant would be its own problem.
+- Did NOT introduce any new Metal concepts in p303. Every piece is
+  reused from earlier tiers. This is intentional — the educational
+  payoff is in showing that complex kernels are compositions of
+  simple patterns, not in piling on new primitives.
+
+### User-side milestone
+
+Earlier in the session, user filled in the p101 scaffold themselves
+from scratch (with iterative compiler-error guidance). Took 3
+iterations to converge: first attempt had Python-shape syntax
+throughout; second fixed the Python-vs-C++ issues but kept TODO 3
+and TODO 4 mixed; third fixed the for-loop syntax but missed two
+semantic issues (barrier inside loop, thread-0 write inside loop).
+I applied the final three fixes when asked. Result: bit-identical
+behavior to the reference kernel (max_abs_err 1.14e-5, speedup
+0.51x). The learning loop works — the scaffold's TODOs lead
+someone through every concept in the right order, and the compiler
+errors are sharp enough to catch syntax issues without giving away
+semantic ones.
+
+---
+
 ## 2026-06-26 — Tier 3 matmul ladder, Tier 4 layernorm + fused_linear_relu, fusion thesis refined
 
 Jumped from Tier 2 (reductions) to Tier 3 (tiled). One problem
