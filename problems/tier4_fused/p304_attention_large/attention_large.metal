@@ -34,7 +34,10 @@ kernel void attention_large(
     // ---------- phase 1: scores ----------
     // Thread tid computes s[tid] = (Q[m] · K[tid]) * SCALE. Dot-product
     // length is now D=512 (vs 64 in p303) — the main per-thread compute
-    // bump. K read coalesced within a row (sequential per thread).
+    // bump. K read pattern: sequential WITHIN a thread (good for its
+    // own prefetch) but UNCOALESCED across adjacent threads — at fixed
+    // d, neighbours are D=512 floats apart, so each SIMD-group load
+    // becomes 32 separate cache-line fetches. Real bandwidth cost.
     float s = 0.0f;
     for (uint d = 0; d < D; d++) {
         s += q_row[d] * k[tid * D + d];
@@ -75,8 +78,9 @@ kernel void attention_large(
 
     // ---------- phase 3: output ----------
     // Thread tid computes out[m, tid] = sum_j scratch[j] * V[j, tid].
-    // V reads: stride-D across threads at single j → uncoalesced.
-    // At D=512 this stride is 4x p303's; could measurably hurt vs MPS.
+    // V reads: stride-1 across threads at fixed j (thread t reads
+    // v[j*D + t] — adjacent columns of the same row) → COALESCED.
+    // No bandwidth issue here; the uncoalesced reads are in phase 1.
     float o = 0.0f;
     for (uint j = 0; j < M; j++) {
         o += scratch[j] * v[j * D + tid];
