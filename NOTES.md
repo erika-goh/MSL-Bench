@@ -5,6 +5,80 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-29 — corrigendum: phase-3 V reads in p303/p304 are coalesced, phase-1 K reads are the uncoalesced ones
+
+While walking through a quiz on "which lever claws p304 back above
+1×", I traced the V access pattern in phase 3 and noticed the
+kernels and specs in both p303 and p304 had it labeled
+backwards. The reality:
+
+- **Phase 1** (`k[tid * D + d]`): at fixed `d`, thread `t` reads
+  `K[t*D + d]`. Adjacent threads are **D floats apart** in memory.
+  At D=64 (p303) this is bad; at D=512 (p304) it's catastrophic —
+  each SIMD-group load becomes 32 separate cache-line fetches.
+  **This is the real bandwidth cost** in both kernels.
+- **Phase 3** (`v[j * D + tid]`): at fixed `j`, thread `t` reads
+  `V[j*D + t]`. Adjacent threads read **adjacent columns of the
+  same row** → contiguous addresses → fully coalesced. No issue.
+
+The original docs in p303 had phase 1 labeled "coalesced within
+the row" (technically true — *each individual thread* reads its
+row sequentially in time — but misleading, because what matters
+for memory bandwidth is the **across-threads** pattern, not the
+within-thread one) and phase 3 labeled "uncoalesced — leaves
+room for a staged-V follow-up problem." That follow-up problem
+would not have helped; staging K (or transposing its access
+pattern) is what would.
+
+p304 inherited both errors from copying p303's structure.
+
+### Why I missed this twice
+
+I conflated "sequential reads from a single thread's
+perspective" with "coalesced loads from the SIMD group's
+perspective." Those are different properties and only the second
+one matters for memory throughput. When a thread reads its row
+in order, that's a single thread's good prefetch behavior — but
+in the same instruction, the *other 31 threads* in its SIMD
+group are reading their own rows from different cache lines, so
+the actual load issued by the hardware touches 32 lines.
+
+**One-sentence frame to remember:** for GPU memory bandwidth,
+the only access pattern that matters is the one across adjacent
+threads at a single instant — never the one a single thread
+takes over time.
+
+### Why it didn't show up as a performance bug
+
+The 8× win at p303 is dispatch-overhead-dominated, not
+bandwidth-dominated, so the bad K reads were never the
+bottleneck at that size. At p304 the bandwidth cost *is* part of
+the deficit, but it's dwarfed by the compute gap vs MPS's
+matrix-engine matmul — so it didn't surface as "this looks
+slower than expected for the bandwidth." It just looked like
+"this loses to MPS," and that read fine without questioning the
+coalescing labels.
+
+### Files updated (comments only)
+
+p303_attention_head: spec.py, attention_head.metal,
+attention_head_scaffold.metal.
+p304_attention_large: spec.py, attention_large.metal,
+attention_large_scaffold.metal.
+
+No behavior change. Re-ran both kernels: p303 still ~7-8×
+(within MPS-warm/cold noise band), p304 still ~0.25-0.49×.
+
+### Lesson for future kernel reviews
+
+When reading any GPU access-pattern claim, ask: "is this
+talking about a single thread's reads over time, or about
+adjacent threads' reads at one moment?" The two patterns can be
+opposites, and the comment that doesn't specify which is doing
+half the job.
+
+---
+
 ## 2026-06-29 — p304 attention_large: same kernel, M=D=512 → 0.49×, the other end of the curve
 
 Follow-up to p303 within the same session. Last entry's open
