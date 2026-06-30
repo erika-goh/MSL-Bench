@@ -5,6 +5,93 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-30 — p013 gelu (tanh approx): erf isn't in metal_stdlib
+
+Quick Tier 1 close-out after the p208 thermal stop. Wanted a
+thermally-light problem; got both that AND an interesting Metal-
+specific finding worth documenting.
+
+### What got built
+
+`tier1_elementwise/p013_gelu/` — element-wise GELU at length 2^25
+using the tanh approximation:
+
+  gelu(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+
+Reference matches via `F.gelu(x, approximate='tanh')`.
+
+### Result
+
+| metric | value |
+|---|---|
+| compiled / correct | ✓ / ✓ |
+| max_abs_err | 4.77e-7 (1e-5 tolerance) |
+| kernel_ms | 1.42 |
+| reference_ms | 1.68 |
+| speedup | **1.18×** |
+| block_delta_frac | 0.71% (trustworthy) |
+
+Modest specialization premium as predicted — both kernels are
+bandwidth-bound single-dispatch ops, MPS isn't paying any
+multi-dispatch tax. The arithmetic-intensity rule from p206/p207
+checks out here: bandwidth-bound + already-fused MPS reference =
+parity-ish speedup.
+
+That this came back trustworthy despite the post-p208 thermal
+state is itself interesting — elementwise ops are short enough
+(1.4 ms) that they finish before the throttle kicks in mid-block.
+The thermal damage was concentrated on the long-running tiled
+problems (p208's compute filled a much bigger work queue).
+
+### Finding worth keeping: `erf` is missing from metal_stdlib
+
+First draft used the exact form: `0.5 * x * (1 + erf(x / sqrt(2)))`.
+Compile error: `use of undeclared identifier 'erf'`. Apple's
+metal_stdlib omits `erf` and `erfc` even though it includes most
+other math functions (exp, log, tanh, atan, sqrt, rsqrt, etc.).
+CUDA has erf as a built-in; Metal doesn't.
+
+This matters for LLM eval. A model trained on CUDA conventions
+will plausibly emit `erf(x / sqrt(2))` for exact GELU and the
+kernel will fail to compile. **A correct port to Metal must either
+switch to the tanh approximation or polyfill erf via a polynomial
+approximation** — two valid responses, but the model has to know
+to do one of them.
+
+This pattern (Metal omitting a function CUDA has) is worth
+hunting for elsewhere as the catalog grows. Likely other examples:
+the `__half`/`__bfloat16` precision aliases, some
+`__shfl_xor_sync` variants, atomic float ops at warp/SIMD scope.
+
+### Decisions made
+
+- Used tanh approximation rather than polyfilling erf — simpler,
+  matches PyTorch's `approximate='tanh'` cleanly, and the
+  approximation gap is well under the tolerance budget.
+- Did NOT bump the size beyond 2^25 — matches p011 exp's length
+  for direct comparability, and is enough to amortize dispatch
+  overhead.
+- Did NOT chase the `erf` polyfill as a separate problem; it'd
+  be a Tier 1 curiosity at best. A polynomial-erf could become
+  part of a future Tier 4 fused statistic problem if useful.
+
+### Catalog state
+
+| tier | count |
+|---|---|
+| 1 elementwise | **12** |
+| 2 reductions | 9 |
+| 3 tiled | 8 |
+| 4 fused | 7 |
+| **total** | **36** |
+
+Nine problems shipped today. Strongly recommending an actual
+session pause now — GPU thermal state is intermittent, and
+diminishing returns on further problems in this session vs a
+fresh start.
+
+---
+
 ## 2026-06-30 — p208 conv2d_5x5_tiled: halo pattern lands, but GPU finally throttled hard
 
 Eighth problem of the session. The halo memory pattern is the
