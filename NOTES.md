@@ -5,6 +5,113 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-30 — p206 sgemv: two-stage simd_sum reduction pattern, 1.8× MPS
+
+Second non-matmul Tier 3 problem in two sessions. Matrix-vector
+multiply at M=N=4096. Catalog now at 31 problems; Tier 3 at 6.
+
+### What got built
+
+`tier3_tiled/p206_sgemv/` — y = A @ x with one TG per output row.
+Each thread does 16 multiply-adds against its slice of A's row,
+then the TG reduces 256 partial sums to a scalar through a
+two-stage `simd_sum`.
+
+### Result
+
+| metric | value |
+|---|---|
+| compiled / correct | ✓ / ✓ |
+| max_abs_err | 6.87e-5 (well inside 1e-2 tolerance) |
+| kernel_ms (warm, trustworthy) | 0.338 |
+| reference_ms (MPS) | 0.607 |
+| **speedup** | **1.80×** |
+| block_delta_frac | 0.72% |
+
+Comfortable win over MPS for a problem this simple. Memory-bound
+(reading ~64 MB of A and reusing x across rows), so the
+specialization win is bandwidth utilization rather than compute.
+
+### Concept: two-stage simd_sum reduction
+
+This is the first problem in the catalog using `simd_sum` as the
+primary reduction primitive (p305/p306 used it for softmax inside
+a single SG; here it's the central pattern). The mechanic is
+worth pulling out:
+
+1. **Stage 1 — within-SG.** `simd_sum(acc)` collapses the 32 lanes
+   of one SIMD-group into a single float (returned in every
+   lane). No barrier, no scratch.
+2. **Publish.** Each SG's lane 0 writes its partial sum to a TG
+   scratch array indexed by SG. 8 SGs → 8 floats.
+3. **Barrier.** Stage 1's TG writes must complete before stage 2's
+   reads.
+4. **Stage 2 — across-SG.** SG 0 loads the 8 partials (lanes 0..7
+   pull from `sg_partials[lane]`, lanes 8..31 contribute 0), runs
+   `simd_sum` again to combine them, and lane 0 writes y[m].
+
+The compare-point in the catalog is **p101 row_sum**, which does
+the same operation via tree reduction in TG memory: 8 barrier
+layers, 6 iterations of conditional writes. p206's pattern is
+much shorter, uses one barrier total, and would generalize
+trivially to any TG size that's a multiple of 32. **For
+project-internal pedagogy, this is the modern replacement for
+the tree-reduce-in-TG-memory pattern** any time the reduction
+fits in one TG.
+
+### Memory-pattern note (worth flagging for LLM eval)
+
+A is read coalesced: adjacent threads at each strip-mine step
+touch adjacent A addresses within a single row. x is read
+coalesced for the same reason. **x is also reused M=4096 times
+across TGs**, and its footprint (16 KB) almost certainly fits in
+L1, so we shouldn't pay much across-TG bandwidth cost on x.
+That's the kind of analytical step models often skip — the
+naïve port works fine here, so I expect this won't be the
+hardest LLM-eval problem; the trickier ones will be where the
+naïve port has the access pattern wrong (like p205 transpose).
+
+### Thermal observation worth carrying forward
+
+By the time I went to confirm the post-cleanup measurement, the
+GPU had been doing benchmark work for an hour. The next run
+came back with block 3 SLOWER than block 1 (19% delta) — the
+harness's stability check correctly identified thermal
+throttling (suggested "let it cool, plug in power, retry").
+
+I did NOT retry. The earlier warm reading (trustworthy, 0.7%
+block delta) was already taken at a cooler thermal state and
+the only thing that changed afterward was removing an unused
+constant — a no-op for codegen.
+
+**Carrying forward for the report:** the harness has THREE
+states it can report: trustworthy / cold-ramp-untrustworthy /
+thermal-throttle-untrustworthy. We've now hit all three
+naturally in normal use. The Phase 4 thermal discipline writeup
+should describe all three and the operator response for each
+("retry", "retry warm", "stop and cool").
+
+### Decisions made
+
+- Used `simd_sum` instead of tree reduction. This is the modern
+  pattern and the new project-internal default for in-TG
+  reductions.
+- Did NOT stage x into threadgroup memory. L1 should handle it
+  at this size; an empirical p207 variant could verify.
+- Removed the unused `M` constant rather than referencing it in
+  a comment-only way to silence the warning — the comment
+  documents *why* M is implicit in the grid.
+
+### Open items
+
+- p207 staged-x variant if the L1 hit rate proves low (probably
+  unnecessary; benchmarking would tell).
+- Tier 3 still needs more shape diversity: rectangular sgemv,
+  batched matmul, a small conv. Three more would round out Tier
+  3 to 9 problems — half the way to a Tier-3-complete catalog.
+
+---
+
 ## 2026-06-29 — p205 transpose: first non-matmul Tier 3 problem, 4× MPS at 2048²
 
 After scoping discussion concluded we should target ~40–45
