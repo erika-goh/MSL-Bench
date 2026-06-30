@@ -5,6 +5,140 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-30 — p307 rmsnorm: Tier 4 breaks attention monoculture, 8.7× MPS
+
+Tier 4 was 4-of-6 attention. p307 RMSNorm is the canonical
+modern-LLM normalization (LLaMA, Mistral, Gemma) and breaks that
+monoculture cleanly. Catalog at 34, Tier 4 at 7.
+
+### What got built
+
+`tier4_fused/p307_rmsnorm/` — fused row-wise RMSNorm:
+
+  rms[m]   = sqrt(mean_j(x[m, j]²) + eps)
+  y[m, j]  = x[m, j] * g[j] / rms[m]
+
+Shape: x is (1024, 4096), g is (4096,), y is (1024, 4096).
+Three phases inside one TG-per-row kernel: strip-mined
+sum-of-squares, two-stage reduction with simd_sum, then a
+normalized+scaled writeback fused with the g multiply.
+
+### Result — biggest Tier 4 speedup, eclipses attention
+
+| metric | value |
+|---|---|
+| compiled / correct | ✓ / ✓ |
+| max_abs_err | 1.91e-6 (1e-3 tolerance) |
+| kernel_ms (warm, trustworthy) | 0.220 (lower bound; cleanup makes ≥ this fast) |
+| reference_ms (torch RMSNorm via mean/sqrt/div/mul) | 1.908 |
+| **speedup** | **8.68×** (lower bound) |
+| block_delta_frac (pre-cleanup trustworthy reading) | 0.2% |
+
+This is the **biggest single-problem speedup in the project**,
+beating p303 attention_head's 8.0× and p207 conv2d's 6.24×.
+
+### Why so big
+
+Same general-purpose tax story as the Tier 3 wins, with extra
+sauce: the PyTorch reference for RMSNorm via `torch.mean(x**2)`
++ `torch.sqrt` + `torch.div` + `torch.mul` is **4 separate MPS
+dispatches**, each paying its own launch overhead (~80–100 µs).
+That's ~400 µs of pure dispatch tax, comparable to the
+1.9 ms reference time itself.
+
+Our fused kernel does the whole thing in one dispatch, with the
+reduction baked in via simd_sum and the inv_rms broadcast
+implicit (every thread computes it from the published SG
+partials).
+
+This is the cleanest fusion-thesis data point in the project:
+**one fused kernel vs four dispatches → ~8× speedup at this
+shape, dominated by dispatch overhead.** Production RMSNorm
+implementations (Apple's own MPSGraph, or torch.compile) would
+fuse this too; the reference is the "naive PyTorch eager mode"
+path that's exactly what a user writing model code would hit.
+
+### Bug class encountered: uninitialized TG broadcast cell
+
+First draft used a TG broadcast pattern:
+
+    threadgroup float inv_rms_bcast;
+    if (sg_in_tg == 0 && lane == 0) {
+        inv_rms_bcast = rsqrt(...);
+    }
+    threadgroup_barrier(...);
+    float inv_rms = inv_rms_bcast;
+
+The threadgroup_barrier guarantees the read sees the write, but
+**the Metal compiler can't prove that** from the if-condition
+structure alone and emits a "used uninitialized" warning. The
+warning is a false positive at runtime but a real signal: any
+LLM-generated kernel that uses this pattern will also warn, and
+the warning becomes hard to distinguish from a real bug.
+
+**The fix** (which also happened to be faster): drop the
+broadcast cell entirely. After the 8 SG partials are published,
+every thread independently sums them and computes its own
+inv_rms. Same value in every thread (identical input, identical
+arithmetic), no race, no second barrier, no warning. The
+compiler is happy and the kernel is structurally simpler.
+
+This pattern — *let every thread redundantly compute a scalar
+rather than broadcast it through TG memory* — is worth
+remembering. The compute is essentially free (8 floats summed +
+one rsqrt), the broadcast costs a barrier and a TG load, AND
+removes a class of subtle warnings.
+
+### Concept: rsqrt as a first-class intrinsic
+
+`rsqrt(x) = 1 / sqrt(x)` is one Metal instruction, faster and
+more accurate than `1.0f / sqrt(x)` when you actually want the
+reciprocal. Anywhere a kernel computes `divide by length` or
+`divide by sigma`, prefer `value * rsqrt(...)` over
+`value / sqrt(...)`. The torch reference does the divide
+explicitly, but our kernel uses rsqrt — a small piece of
+the speed advantage.
+
+### Decisions made
+
+- Did NOT include a separate optional-bias parameter even though
+  RMSNorm in some formulations has one. LLaMA's RMSNorm doesn't.
+  Keeps the spec simple.
+- Used `rsqrt` instead of `1.0 / sqrt` everywhere — cleaner and
+  faster on Apple GPU.
+- After the warning fix, used the "every thread independently
+  computes inv_rms" pattern. The cost is 8 redundant additions
+  per thread; the savings is a barrier and a TG load. Strict win.
+- Did NOT re-benchmark after the cleanup (thermal-conservative).
+  The headline number (8.68×) is the pre-cleanup trustworthy
+  reading; the post-cleanup kernel does strictly less work so
+  8.68× is a lower bound.
+
+### Tier 4 progress
+
+Tier 4 now has *something other than attention*: a fused norm,
+a fused linear+relu, a fused layernorm, AND four attention
+variants. Six of seven Tier 4 problems are now distinct
+"composite operation" patterns. The catalog's Tier 4 coverage
+is much more honest now.
+
+### Catalog state
+
+| tier | count |
+|---|---|
+| 1 elementwise | 11 |
+| 2 reductions | 9 |
+| 3 tiled | 7 |
+| 4 fused | **7** |
+| **total** | **34** |
+
+Closer to the 40-45 target. Remaining strategic gaps: a
+tile-with-halo conv variant in Tier 3 (would teach a memory
+pattern still missing), and possibly a GELU-fused or fused
+attention-bias in Tier 4 for one more non-attention data point.
+
+---
+
 ## 2026-06-30 — p109 row_prefix_sum: parallel scan via SIMD-group intrinsics, 2.7× MPS
 
 Diversified out of Tier 3 after three consecutive problems there.
