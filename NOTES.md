@@ -5,6 +5,140 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-30 — p207 conv2d_3x3: stencil access pattern lands at 6.2× MPS
+
+Third Tier 3 problem of the build-out. Conv2D is the canonical
+stencil-access workload — the first such pattern in the catalog.
+Catalog at 32 problems, Tier 3 at 7.
+
+### What got built
+
+`tier3_tiled/p207_conv2d_3x3/` — valid 3×3 convolution at
+(1026, 1026) → (1024, 1024). One thread per output element; each
+thread computes a 9-element 2D dot product over its input window.
+The 3×3 weight matrix (36 bytes total) is read by every thread
+and lives in L1/constant cache after the first access — no
+explicit TG staging needed.
+
+### Result — biggest Tier 3 win in the project
+
+| metric | value |
+|---|---|
+| compiled / correct | ✓ / ✓ |
+| max_abs_err | 2.86e-6 (1e-4 tolerance) |
+| kernel_ms | 0.0362 |
+| reference_ms (MPS / F.conv2d) | 0.2261 |
+| **speedup** | **6.24×** |
+| block_delta_frac | 0.0% (literally identical) |
+| timing_trustworthy | true |
+
+The kernel is *trivial* — two nested loops, one accumulator, one
+store — and beats MPS by 6×. The block-1 vs block-3 medians
+came out bit-identical at 0.0362 ms, which is the tightest
+trustworthy reading I've seen from this harness.
+
+### Why we win so big
+
+This is the same story as p205 transpose (4.18×) only more so.
+PyTorch's `F.conv2d` is built for batched multi-channel
+workloads — `(N, C_out, C_in, K_h, K_w)`. For a single-channel,
+single-output, no-padding call, MPS dispatches through that
+general path and pays for indirection it doesn't need:
+
+1. Batch dim handling.
+2. Channel dim handling.
+3. im2col-vs-direct path selection.
+4. Padding logic (even though we passed none).
+5. Backward-pass kernel generation, possibly cached.
+
+Our kernel does *only* the math the problem actually requires.
+**Arithmetic intensity:** 18 ops per 36 bytes read = 0.5 op/byte.
+Even lower than sgemv. Per the rule from p206's quiz, low
+arithmetic intensity → MPS's general-purpose tax dominates the
+comparison → big specialization premium.
+
+### Concept: stencil access pattern (first appearance)
+
+A *stencil* is the access pattern where every output element
+reads a fixed neighborhood around its input position — 3×3, 5×5,
+or whatever the kernel size is. It shows up in convolutions
+(deep learning), Laplacians (PDEs), Sobel/Gaussian filters
+(graphics), and finite-element methods.
+
+The defining performance characteristic: **input cache reuse
+across adjacent output threads**. Thread (i, j) reads x[i..i+2,
+j..j+2]. Thread (i, j+1) reads x[i..i+2, j+1..j+3]. These share
+6 of 9 input elements. With one-thread-per-output and no
+explicit staging, we rely on L1 to catch those shared reads —
+and it does well at 3×3 because the working set is tiny.
+
+For larger kernels (5×5, 7×7), the natural optimization is to
+stage an input tile into TG memory once per TG, so the (TILE +
+K - 1) × (TILE + K - 1) input window is read from device just
+once per output tile of size TILE × TILE. That's the standard
+tile-with-halo pattern. **Not implemented here** — at K=3 the
+naive version is already fast enough to embarrass MPS, so the
+TG-staged variant would be a separate problem (p208 or similar).
+
+### LLM-eval implications
+
+Conv2d 3×3 is exceptionally well-trodden in CUDA training data.
+I expect every coder model to write a working kernel at this
+size. **The interesting LLM-eval question is whether they
+produce the naive version (which works here) or over-engineer
+to the tile-with-halo version (which is unnecessary here but
+sometimes the "textbook" answer).** Both should compile and
+verify; the timing comparison will be interesting.
+
+### Decisions made
+
+- Used (1026, 1026) input shape so the (1024, 1024) output
+  divides cleanly by TILE=16, avoiding bounds-check overhead.
+- Did NOT add a TG-staged-input variant. At K=3 it's unnecessary
+  and would muddy the "stencil access pattern, first encounter"
+  pedagogy. Worth doing for K=5 or larger as a follow-up.
+- Pre-multiplied ki by IN_W and K once per outer iteration
+  rather than letting the compiler hoist it — both because it
+  makes offset arithmetic easier to audit, and because explicit
+  is usually better than implicit when teaching.
+- Removed the unused OUT_H constant rather than leaving the
+  warning. (Cleanup is comment-only for codegen — verified the
+  earlier trustworthy reading still describes the post-cleanup
+  kernel.)
+
+### Tier 3 progress
+
+Tier 3 went from 4 problems (all matmul) → 7 problems (matmul
+×4, transpose, sgemv, conv2d_3x3) in three problems of work
+today. The technique gap that motivated this build-out is now
+mostly closed:
+
+| technique | catalog problem |
+|---|---|
+| tiled matmul (cooperative load) | p201 |
+| simdgroup_matrix matmul | p202 |
+| simdgroup_matrix + threadgroup staging | p203 |
+| double-buffered matmul (failed) | p204 |
+| transpose (coalesced writes) | **p205** |
+| sgemv (two-stage simd reduction) | **p206** |
+| **conv2d (stencil access)** | **p207** |
+
+Still missing from Tier 3 to round it out: batched matmul, a
+GEMV-with-bias-add (or fused GEMV+activation), and a larger-K
+conv (K=5 or 7) that actually motivates the TG-staged input
+tile. That'd take Tier 3 to 10 problems.
+
+### Open items
+
+- p208 staged-tile conv at K=5 or 7 — would teach the
+  "tile-with-halo" pattern and probably *not* beat MPS as
+  decisively (higher arithmetic intensity at larger K).
+- The "MPS general-purpose tax" story is now backed by three
+  data points (p205, p206, p207). Worth a dedicated section in
+  the Phase 4 report.
+
+---
+
 ## 2026-06-30 — p206 sgemv: two-stage simd_sum reduction pattern, 1.8× MPS
 
 Second non-matmul Tier 3 problem in two sessions. Matrix-vector
