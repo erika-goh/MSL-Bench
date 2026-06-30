@@ -5,6 +5,140 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-30 — p109 row_prefix_sum: parallel scan via SIMD-group intrinsics, 2.7× MPS
+
+Diversified out of Tier 3 after three consecutive problems there.
+Parallel scan is a fundamental primitive that was completely
+absent from the catalog — every CUDA tutorial covers it. Now in
+Tier 2. Catalog at 33 problems.
+
+### What got built
+
+`tier2_reductions/p109_row_prefix_sum/` — row-wise inclusive
+prefix sum (cumsum) on a (1024, 4096) matrix. One TG per row,
+256 threads each, three-stage parallel scan.
+
+### Result
+
+| metric | value |
+|---|---|
+| compiled / correct | ✓ / ✓ (first try, no warnings) |
+| max_abs_err | 4.58e-5 (1e-2 tolerance) |
+| kernel_ms | 0.163 |
+| reference_ms (torch.cumsum) | 0.434 |
+| **speedup** | **2.67×** |
+| block_delta_frac | 6.9% (just under 7% trustworthy threshold) |
+
+Less dramatic than the Tier 3 wins (which were 2–6× on
+arithmetic-intensity-low memory-movement problems), but solid
+for a problem with real cross-thread coordination — three
+stages, two barriers, and SIMD intrinsics that don't have a
+naive scalar fallback.
+
+### Concept: SIMD-group scan intrinsics (first appearance)
+
+Apple GPUs expose lane-level prefix sums in addition to the
+reductions seen in p206:
+
+  * `simd_prefix_inclusive_sum(v)` → in lane k of the SIMD-group,
+    returns the sum of `v` from lanes 0..k inclusive.
+  * `simd_prefix_exclusive_sum(v)` → same but lanes 0..k-1
+    (lane 0 returns 0).
+  * `simd_broadcast(v, src_lane)` → returns `v` from src_lane in
+    every lane.
+
+These are the Metal equivalent of NVIDIA's `__shfl_up_sync`
+patterns. They run on the SIMD-group's lane interconnect — no TG
+memory, no barriers, single instruction per call.
+
+For this problem we only needed `simd_prefix_inclusive_sum`;
+the EXCLUSIVE scan was synthesized as `inclusive(v) - v`. That
+keeps the kernel portable to older Metal versions that may not
+expose the dedicated exclusive intrinsic.
+
+### Algorithm: three-stage parallel scan
+
+Standard Blelloch-style scan adapted to the (32-lane SG × 8 SGs
+× 16-element-strips-per-thread) hierarchy:
+
+1. **Per-thread sequential scan** of 16 contiguous elements.
+   Each thread keeps an array of running prefixes and a single
+   thread_total.
+2. **Within-SG scan** via `simd_prefix_inclusive_sum` on the
+   thread_totals. Each thread learns its SG-relative exclusive
+   prefix in one instruction.
+3. **Cross-SG scan** via one SG (SG 0) loading the 8 SG totals
+   from TG memory, running the same intrinsic, and writing back
+   the exclusive scan.
+
+Each thread then adds (its SG's prefix + its within-SG exclusive
+prefix) to its 16 local results.
+
+Total cross-thread coordination depth: 2 barriers. Critical-path
+latency: O(log N) — much less than torch.cumsum's sequential
+O(N) on CPU/GPU. The 2.67× speedup is the practical realization
+of that asymptotic advantage at N=4096.
+
+### Why we don't win bigger
+
+torch.cumsum on MPS is *not* fully sequential — it almost
+certainly uses a parallel scan algorithm internally. But MPS's
+implementation pays the usual general-purpose tax (batched
+multi-row dispatch, multiple dtype paths, etc.) and ours is
+specialized to the exact shape and the simdgroup hierarchy. The
+gap is meaningful (2.67×) but smaller than the Tier 3
+memory-movement problems because the algorithm itself is
+non-trivial — there's less "specialization daylight" between a
+tuned scan and a naive scan than between a tuned and naive
+memory copy.
+
+### LLM-eval implications
+
+Three risk areas for LLM coders on this problem:
+
+1. **Knowing the intrinsic name.** Metal's
+   `simd_prefix_inclusive_sum` vs CUDA's `__shfl_up_sync`-based
+   handrolled scan. A model trained heavily on CUDA may write a
+   handrolled NVIDIA-style scan that doesn't compile in Metal.
+2. **Handling the cross-SG step.** Trees of barriers vs the
+   two-stage gather-and-scan approach used here. A naive port
+   may use threadgroup memory for the within-SG step too, which
+   is correct but slow.
+3. **The exclusive-vs-inclusive distinction.** The combining
+   formula needs exclusive prefixes; inclusive prefixes give
+   off-by-one wrong answers that look almost right but fail
+   verification. Classic bug class.
+
+This will be a sharp discriminator in Phase 3.
+
+### Decisions made
+
+- Used `simd_prefix_inclusive_sum(v) - v` instead of
+  `simd_prefix_exclusive_sum(v)` for portability — works on any
+  Metal version that has inclusive_sum, which is older.
+- Used CONTIGUOUS per-thread slices (not strip-mined) because
+  the algorithm is cleaner that way. Total bandwidth is the same
+  either way; strip-mined would have better per-iteration
+  coalescing but worse algorithmic ergonomics.
+- Did NOT include a second scaffold variant exercising
+  simd_prefix_exclusive_sum directly. One scaffold per problem
+  is the established convention.
+
+### Catalog state
+
+| tier | count | techniques covered |
+|---|---|---|
+| 1 elementwise | 11 | broad |
+| 2 reductions | **9** | row/col sums, max, argmax, softmax, **scan** |
+| 3 tiled | 7 | matmul ×4, transpose, sgemv, conv2d_3x3 |
+| 4 fused | 6 | layernorm, fused_linear_relu, attention ×4 |
+
+33 problems total. Still gunning for 40–45; remaining gaps are
+diversifying Tier 4 beyond attention (RMSNorm, GELU-fused,
+residual ops) and a tile-with-halo conv variant in Tier 3.
+
+---
+
 ## 2026-06-30 — p207 conv2d_3x3: stencil access pattern lands at 6.2× MPS
 
 Third Tier 3 problem of the build-out. Conv2D is the canonical
