@@ -5,6 +5,136 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-06-30 — p208 conv2d_5x5_tiled: halo pattern lands, but GPU finally throttled hard
+
+Eighth problem of the session. The halo memory pattern is the
+last canonical CUDA stencil-optimization missing from the catalog
+— now in. **Correctness verified, but timing is unreliable due
+to thermal throttling.** Catalog at 35.
+
+### What got built
+
+`tier3_tiled/p208_conv2d_5x5_tiled/` — 5×5 valid convolution at
+input (1028, 1028) → output (1024, 1024), with the canonical
+tile-with-halo input staging pattern.
+
+- Each TG covers a 16×16 output block.
+- That output block depends on a 20×20 input region (the output
+  footprint + 2 halo pixels per side).
+- 256 threads cooperatively load all 400 input pixels into TG
+  memory via a single flat strided loop (most threads load 1
+  pixel; 144 of them load 2).
+- One barrier, then every output thread computes its 5×5 dot
+  product reading exclusively from TG memory. Zero redundant
+  device reads.
+
+### Result — correctness yes, perf measurement no
+
+| metric | value |
+|---|---|
+| compiled / correct | ✓ / ✓ (no warnings) |
+| max_abs_err | **0.0** (bit-exact!) |
+| timing_trustworthy | **false** (thermal throttling) |
+| block_1_median_ms | 0.080 (suggestive of strong perf) |
+| block_3_median_ms | 0.250 (3.1× slower — clear throttle) |
+| block_delta_frac | 212.7% (vs 7% threshold) |
+| stability_error | "thermally throttling, on battery, or under competing GPU load; let it cool, plug in power, retry" |
+
+### Bit-exact result is the most interesting finding
+
+For a 25-element fp32 dot product against `F.conv2d`, I expected
+~1e-5 absolute error from accumulation-order differences (this
+was the case in p207 K=3 conv, which had max_abs_err 2.86e-6).
+Here max_abs_err is literally 0.0 across the (1024, 1024) output.
+
+That implies our row-major accumulation order matches MPS's exactly.
+**MPS's conv2d for this size is also a direct convolution** (not
+im2col-then-matmul, not Winograd) **using the same kernel
+traversal order we used.** That's a small finding about MPS's
+internal dispatch heuristics worth keeping.
+
+For larger kernels, MPS would presumably switch to FFT-based or
+Winograd convolution, where the algorithm change would shift
+the rounding profile and bit-exactness would disappear.
+
+### The thermal-state story now needs a proper writeup
+
+Today we've hit the harness's three trustworthiness states
+naturally, all of them legitimately:
+
+1. **Trustworthy** (block_delta < 7%): the common case after
+   warmup, used for headline numbers.
+2. **Cold-ramp-untrustworthy** (block 3 FASTER than block 1):
+   first run after a process restart or idle period.
+3. **Thermal-throttle-untrustworthy** (block 3 SLOWER than block
+   1): after sustained GPU load. Now observed.
+
+For p208 the right move is to NOT retry — pushing through means
+producing numbers that mostly measure the throttle state. The
+correctness verification is what's load-bearing for catalog
+inclusion; the timing comparison can be retaken in a fresh
+session.
+
+**Carrying forward as a Phase 4 report concern:** the
+benchmark needs a documented "session protocol" — start cool,
+verify with a short ramp, measure each problem ≤ N times, stop
+when block_delta exceeds X. Without one, "speedup" numbers in
+the catalog represent a mix of cool/warm/throttled states.
+
+### Open: does the halo pattern actually help on Apple Silicon?
+
+The empirical question this problem was designed to answer is
+unanswered. The clean comparison would be a side-by-side of:
+- p207 conv2d_3x3 (naïve, 6.24× MPS warm)
+- p208 conv2d_5x5_tiled (halo, ?? MPS warm)
+- A hypothetical p209 conv2d_5x5_naïve (no halo, ?? MPS warm)
+
+Without p209 or a trustworthy p208 reading, we can't say
+whether the halo pattern outperforms naïve L1 caching at K=5.
+**Block 1's 0.080 ms is suggestive that p208 is competitive
+with p207** (which makes sense — naïve K=5 would read 25 pixels
+per output vs p207's 9, so even with perfect L1 we'd expect K=5
+to be slower — and yet block 1 is in p207's neighborhood).
+But "suggestive" isn't trustworthy enough for the catalog
+headline.
+
+### Decisions made
+
+- Used a single flat strided loop for the cooperative load
+  instead of the more common "boundary-thread loads extra
+  halo pixels" pattern. Cleaner code; same total work.
+- Did NOT build a p209 naïve K=5 to directly measure the halo
+  benefit. Would need a fresh thermal state to measure either
+  trustworthily.
+- Kept K=5 instead of going larger (K=7 or K=9). 5 is enough
+  to introduce the halo concept; larger Ks just scale the work
+  without teaching anything new.
+- Did NOT retry the timing run. The trustworthy reading we
+  *could* get would just be the post-throttle steady-state,
+  which is contaminated by today's session, not the kernel's
+  inherent perf.
+
+### Catalog state
+
+| tier | count |
+|---|---|
+| 1 elementwise | 11 |
+| 2 reductions | 9 |
+| 3 tiled | **8** |
+| 4 fused | 7 |
+| **total** | **35** |
+
+Now 5–10 problems short of the 40–45 target. The biggest
+remaining strategic question is whether to:
+- Push another 5+ problems to reach 40 (sustained Phase 2 grind)
+- Pause Phase 2, run a Phase 3 LLM eval on the current 35-problem
+  catalog as a milestone check (would tell us what techniques
+  models can/can't write, informing what to build next)
+
+The session's thermal state argues for pausing in any case.
+
+---
+
 ## 2026-06-30 — p307 rmsnorm: Tier 4 breaks attention monoculture, 8.7× MPS
 
 Tier 4 was 4-of-6 attention. p307 RMSNorm is the canonical
