@@ -4,7 +4,7 @@ runner:
 	swift build -c release --package-path runner
 
 test:
-	pytest tests/test_verify_score.py -v
+	pytest tests/test_verify_score.py tests/test_llm.py -v
 
 test-mac: runner
 	pytest tests/ -v
