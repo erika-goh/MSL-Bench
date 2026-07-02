@@ -59,7 +59,7 @@ def build_prompt(problem: dict) -> list[dict]:
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
 
-_BLOCK_RE = re.compile(r"```(?:metal|cpp|c\+\+)?\s*\n(.*?)```", re.DOTALL)
+_BLOCK_RE = re.compile(r"```(?:metal|objc|cpp|c\+\+|c)?\s*\n(.*?)```", re.DOTALL)
 
 
 def extract_metal(text: str) -> str | None:
