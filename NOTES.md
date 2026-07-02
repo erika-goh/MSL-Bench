@@ -5,6 +5,122 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-02 — Phase-3 scaffolding session: no new kernels, four infra commits
+
+First session where thermal caution was the explicit framing from the
+start, so no new benchmark problems shipped. Instead: filled in the
+last CPU-only gaps between "we have 36 problems + LLM providers wired"
+and "we can produce a defensible first leaderboard." Four small commits.
+
+### What got built
+
+| commit | what |
+|---|---|
+| `150d83a` | `--only p001,p013,...` flag on `run_suite.py` (targeted LLM smoke tests) |
+| `34b7354` | `extract_metal` regex accepts ` ```c` and ` ```objc` fences + 9 regression tests |
+| `7e920c0` | `scripts/preflight.py` — pings each provider, skips (not fails) unset creds |
+| `045e5f3` | Per-problem × per-run failure-stage table in `make_leaderboard.py`, plus an "unbeaten problems" callout that engages at n_runs ≥ 2 |
+
+Test count went 24 → 33. All pure-Python, no Mac needed.
+
+### Finding worth keeping: the 6-problem ollama smoke test is legit signal
+
+`results/raw/` had 6 stale records from a prior local ollama run —
+qwen2.5-coder:14b, one_shot, one problem per tier. **0/6 correct**,
+5 compile fails + 1 verify fail. Before designing a bigger run I
+inspected the transcripts to make sure it wasn't a prompt bug.
+
+Two failure modes worth remembering:
+
+- **p001 vector_add** (compile fail): qwen wrote
+  `uint3 gid [[thread_position_in_grid]]` for a **1D** dispatch, then
+  compared `gid < 33554432` (uint3 vs scalar) and indexed `a[gid]`.
+  Doesn't compile — `uint3` isn't implicitly comparable-to or
+  indexable-with a scalar. The right answer is `uint gid` for a 1D
+  grid. Model didn't infer dimensionality from the 1D input shape.
+
+- **p201 matmul_tiled** (verify fail — compiled fine): qwen wrote
+  `thread float tileA[TILE][TILE]` — this is **per-thread** register
+  memory in Metal, not shared. CUDA's `__shared__` should map to
+  Metal's `threadgroup` address space, but the model wrote `thread`
+  instead. So each thread had its own private tile, cooperative loads
+  wrote into other threads' unreachable memory, and the dot product
+  read garbage. Kernel silently produces wrong answers.
+
+That second one is **exactly** the class of mistake this benchmark
+exists to surface. The whole thesis of "measures Metal translation
+competence, not algorithm discovery" needs data like this to defend,
+and now we have some. Also validates the prompt-hint policy (below):
+if we'd told the model "use `threadgroup` for shared tiles" this
+signal would have vanished.
+
+### Finding worth keeping: ollama-14b latency floor is ~7s per call
+
+Preflight measured a **one-word** ollama round-trip at 7.05s cold.
+Real kernel generations produce full files with 30–100 lines of MSL.
+Rough extrapolation: 30–60s per call. So:
+
+| run shape | ballpark wall time |
+|---|---|
+| ollama one_shot × 36 | 20–40 min |
+| ollama repair@5 × 36 | 60–180 min worst case |
+| groq / gemini one_shot × 36 | ~15 min (network + free-tier rate limits) |
+| groq / gemini repair@5 × 36 | 30–90 min |
+
+The ollama numbers are the thermally-expensive ones — sustained local
+14b generation warms the laptop noticeably. Groq/gemini are basically
+network sleeps + a few hundred ms of local kernel bench GPU per call.
+Point being: **for the first leaderboard row, use groq or gemini**,
+not ollama. Only bring ollama back in when we have a chunk of time
+where laptop heat is acceptable.
+
+### Decisions made
+
+- **Prompt stays Metal-agnostic** — no `threadgroup` hint, no
+  dimensionality hint. The p201 finding above is the proof that
+  hints would leak signal. A "hinted" arm can be added later as a
+  separate mode if the article needs it, but v1 measures raw
+  translation competence.
+- **Preflight skips unset creds, fails only on genuine errors** —
+  matters because the user often has one provider set up at a time
+  during development, and a preflight that hard-fails when
+  `GEMINI_API_KEY` is missing would just be noise.
+- **Leaderboard's "unbeaten problems" callout requires n_runs ≥ 2** —
+  with one run the pass column already tells you which problems are
+  unbeaten, so the callout would be pure duplication.
+- **Four separate commits, not one** — matches the repo's small-commit
+  style. Each has an independent explanation of what it changes and
+  why, which is what future-me (or a reader) wants.
+- **Chose analysis-first ordering** (step 7 before steps 3-6) once
+  step 3 was blocked on missing API keys. Now when the keys land,
+  every downstream reporting change is already in place — the run
+  produces both the raw JSON and immediately-useful diagnostics.
+
+### Open items (carry into next session)
+
+- **API keys not set** — `GROQ_API_KEY` and `GEMINI_API_KEY` need to
+  be exported before step 3. Both providers offer free tiers, ~2 min
+  signup each (`console.groq.com`, `aistudio.google.com`).
+- **`make test` requires venv activation** — the Makefile calls plain
+  `pytest`, but pytest lives in `.venv/bin/pytest`. Pre-existing,
+  worked around by activating before `make test`. Cheap fix: change
+  target to `python3 -m pytest ...` inside a `. .venv/bin/activate &&`
+  prefix, or document the venv step.
+- **Ollama full run needs a dedicated thermal budget** — 1–3 hours of
+  sustained load. Not tonight.
+- **Prompt anti-example section** — tempting to add "don't do X" hints
+  based on the two failures above, but that violates the agnostic-
+  prompt decision. Revisit only if step-3 groq run shows systematic
+  same-class failures — otherwise the mistakes ARE the finding.
+
+### Catalog state
+
+Unchanged — 36 problems total (12 T1 + 9 T2 + 8 T3 + 7 T4).
+Phase-3 infra is now feature-complete for a groq/gemini leaderboard
+row. Zero laptop heat this session.
+
+---
+
 ## 2026-06-30 — p013 gelu (tanh approx): erf isn't in metal_stdlib
 
 Quick Tier 1 close-out after the p208 thermal stop. Wanted a
