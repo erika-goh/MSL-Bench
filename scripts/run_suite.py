@@ -72,9 +72,12 @@ def main() -> None:
     ap.add_argument("--mode", choices=["one_shot", "repair"], default="one_shot")
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--tier", type=int, default=None, help="restrict to one tier")
+    ap.add_argument("--only", default=None,
+                    help="comma-separated problem ids to include (e.g. p001_vector_add,p013_gelu)")
     ap.add_argument("--sleep", type=float, default=2.0,
                     help="seconds between problems (be gentle with free tiers)")
     args = ap.parse_args()
+    only = set(x.strip() for x in args.only.split(",")) if args.only else None
 
     RESULTS_RAW.mkdir(parents=True, exist_ok=True)
     run_tag = f"{args.provider}_{(args.model or 'default').replace('/', '-').replace(':', '-')}_{args.mode}"
@@ -85,6 +88,8 @@ def main() -> None:
         if args.tier and problem["tier"] != args.tier:
             continue
         pid = problem["id"]
+        if only is not None and pid not in only:
+            continue
         print(f"[{run_tag}] {pid} ...", flush=True)
 
         if args.mode == "one_shot":
