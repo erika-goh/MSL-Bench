@@ -4,10 +4,10 @@ runner:
 	swift build -c release --package-path runner
 
 test:
-	pytest tests/test_verify_score.py tests/test_llm.py -v
+	. .venv/bin/activate && pytest tests/test_verify_score.py tests/test_llm.py -v
 
 test-mac: runner
-	pytest tests/ -v
+	. .venv/bin/activate && pytest tests/ -v
 
 # Phase 0 exit criterion: golden kernel passes end to end
 slice: runner
