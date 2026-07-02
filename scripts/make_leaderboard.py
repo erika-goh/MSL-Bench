@@ -13,6 +13,15 @@ from mkb.score import fast_p, tier_table
 RAW = Path(__file__).resolve().parents[1] / "results" / "raw"
 TABLES = Path(__file__).resolve().parents[1] / "results" / "tables"
 
+STAGE_GLYPH = {
+    None: "✓",       # correct
+    "compile": "c",
+    "runtime": "r",
+    "verify": "v",
+    "no_code": "n",
+}
+NOT_RUN = "·"
+
 
 def main() -> None:
     runs: dict[str, list[dict]] = defaultdict(list)
@@ -41,10 +50,62 @@ def main() -> None:
                          f"| {row['fast_1']:.1%} | {row['fast_2']:.1%} |")
         lines.append("")
 
+    lines += _problem_status_section(runs)
+
     TABLES.mkdir(parents=True, exist_ok=True)
     out = TABLES / "leaderboard.md"
     out.write_text("\n".join(lines))
     print(f"wrote {out}")
+
+
+def _problem_status_section(runs: dict[str, list[dict]]) -> list[str]:
+    """One row per problem, one column per run. Cell = ✓ (correct) or fail-stage glyph."""
+    run_names = sorted(runs)
+    # index: (pid, tier) -> {run_name: record}
+    by_problem: dict[tuple[str, int], dict[str, dict]] = {}
+    for run_name, recs in runs.items():
+        for r in recs:
+            by_problem.setdefault((r["problem"], r["tier"]), {})[run_name] = r
+
+    lines = ["## Per-problem failure stage",
+             "",
+             "Legend: `✓` correct · `c` compile · `r` runtime · `v` verify · "
+             "`n` no code emitted · `·` not run.",
+             ""]
+
+    header = ["Problem", "T"] + run_names + ["✓/n"]
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("|" + "|".join(["---"] * len(header)) + "|")
+
+    for (pid, tier) in sorted(by_problem, key=lambda k: (k[1], k[0])):
+        row_recs = by_problem[(pid, tier)]
+        cells: list[str] = []
+        n_pass = 0
+        n_ran = 0
+        for run_name in run_names:
+            r = row_recs.get(run_name)
+            if r is None:
+                cells.append(NOT_RUN)
+                continue
+            n_ran += 1
+            if r["correct"]:
+                n_pass += 1
+                sp = r.get("speedup")
+                cells.append(f"✓ {sp:.1f}×" if sp else "✓")
+            else:
+                cells.append(STAGE_GLYPH.get(r["fail_stage"], "?"))
+        lines.append(f"| {pid} | {tier} | " + " | ".join(cells) + f" | {n_pass}/{n_ran} |")
+    lines.append("")
+
+    # Callout: problems no run has passed yet.
+    unbeaten = [(pid, tier) for (pid, tier), rs in by_problem.items()
+                if not any(r["correct"] for r in rs.values())]
+    if unbeaten and len(runs) >= 2:
+        lines += ["### Unbeaten problems (0 correct across all runs)",
+                  "",
+                  ", ".join(pid for pid, _ in sorted(unbeaten, key=lambda k: (k[1], k[0]))),
+                  ""]
+    return lines
 
 
 if __name__ == "__main__":
