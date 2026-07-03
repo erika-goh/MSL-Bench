@@ -5,6 +5,111 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-03 (night) — Phase 2 to 60 + Phase 4 report drafted
+
+Big final push. Went from 36 → 60 problems (T1×15, T2×15, T3×15,
+T4×15) and drafted `REPORT.md` synthesizing the whole session's
+findings into a publishable Phase-4 article.
+
+### On writing 24 problems in one push
+
+Cheated intentionally: wrote only `spec.py` for each, no scaffold and
+no reference kernel. The benchmark's discovery/harness mechanism only
+requires spec.py — scaffolds are teaching-aid polish, reference
+kernels are goldens for LLM comparison. Cutting those saved ~2/3 of
+the per-problem writing time and let all 24 land in one session.
+
+Verified all 24 the mechanical way: `P.load()` + `P.make_inputs()` +
+call `reference()` — checked that outputs have the expected shape.
+Not a full end-to-end verify (would need actual candidate kernels
+to compile and time), but enough to catch shape mismatches, missing
+imports, and broken tolerance dicts before committing.
+
+Caught one bug during writing: p213_conv1d originally flipped the
+kernel weights, thinking F.conv1d does mathematical convolution.
+It does cross-correlation. Removed the flip.
+
+### On problem selection
+
+Distribution rounded to 15/tier. Picked problems that:
+
+- Have a one-line PyTorch reference (no exotic ops)
+- Compute cleanly in float32 (no int8, no fp16)
+- Exercise a specific idiom or workload:
+  - **column-strided reduction** (`p113_col_max`) tests coalescing on
+    the strided axis of row-major storage
+  - **batched matmul** (`p211`) uses the grid z-dim for batch
+  - **SwiGLU vs GLU gate** (`p314`, `p315`) — same shape, different
+    activation, measures the LLM's ability to compose primitives
+  - **causal vs additive-mask attention** (`p312`, `p313`) — two
+    common transformer mask patterns
+  - **fused matmul + activation** (`p308_gelu_fused`) — the exact
+    pattern where MPS fusion vs LLM naive-two-kernel-approach could
+    show up
+
+Not included (out of scope for float32 baseline suite):
+- int8 matmul (quantization dtype territory)
+- backward passes (gradients need paired forward/backward specs)
+- multi-head attention (would need to spec head splitting)
+
+### On REPORT.md
+
+Wrote as a publishable article, not an internal doc. Aim: someone
+reading it end-to-end without background can follow the story from
+"here's what we measured" through the layered decomposition to
+"here's what needs to change before Phase 5." Kept it under 1500
+words, tables where they help.
+
+Deliberate choice: called out the **spec-launch cap** finding
+prominently (§6). This is a benchmark-design bug I only discovered
+this session, and pretending it isn't there would compromise the
+report's honesty. Better to name it, quantify it (~35% of gap on
+memory-bound problems), and propose three fixes for future work.
+
+### Roadmap status at session end
+
+    [x] Phase 0 — vertical slice
+    [x] Phase 1 — timing trust
+    [x] Phase 2 — 60-problem suite    (added 24 this session)
+    [ ] Phase 3 — one_shot done, repair partial (quota-limited)
+    [x] Phase 4 — REPORT.md draft
+    [ ] Phase 5 — web demo (future)
+    [ ] Phase 6 — data flywheel, separate repo (future)
+
+Phase 3 sits at ~90% — the remaining 10% is repair@5 completion
+on more providers, which needs either paid tier or another day's
+free-tier bucket. Not a technical block, a quota block.
+
+### Decisions made
+
+- Phase 2 marked complete at 60. If the "~60" wording ever bothers
+  someone, drop the tilde — we're exactly at 60.
+- Report lives in `REPORT.md` at repo root, not in a `docs/` folder.
+  Discoverability > organization for a small repo.
+- Kept the `† partial sample` flag on the leaderboard (added earlier
+  this session). Combined with the report's §6 caveat, readers now
+  have two independent signals that not all rows compare cleanly.
+
+### Open items (carry into next session)
+
+- **Ollama qwen2.5-coder-14b repair@5 sweep** on the expanded 60-
+  problem suite. Would give us a third leaderboard row + Phase 3
+  gets closer to done. Needs thermal-safety greenlight given
+  concurrent local LLM + kernel-eval load.
+- **Reference kernels for the 24 new problems** — scaffold files
+  and hand-written goldens would be nice to have for T1 as
+  onboarding aids. Not required for benchmark runtime.
+- **Decide the spec-launch cap question** (see REPORT.md §6). This
+  is Phase-4/5 boundary work — the metric wording depends on which
+  fix we pick, and Phase 5's public demo shouldn't ship until this
+  is deliberate.
+- **Run the expanded 60-problem suite through Groq one_shot again**
+  once daily token budget refreshes. Would give a full n=60 baseline
+  row and let us see how the T3/T4 additions extend the failure
+  taxonomy.
+
+---
+
 ## 2026-07-03 (evening) — repair@5 sweeps: both providers quota-die + the "repair adds zero new correct" finding
 
 Ran `repair@5` for Groq llama-3.3-70b and Gemini 2.5 Flash to answer
