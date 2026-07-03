@@ -6,3 +6,4 @@ __pycache__/
 results/raw/*.json
 results/calibration.json
 .venv/
+*_run.log

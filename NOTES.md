@@ -5,6 +5,160 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-03 (later) — Groq row lands + Cloudflare bot-signature bug
+
+Second Phase-3 leaderboard row: `llama-3.3-70b-versatile` (Groq), one_shot,
+all 36 problems in one uninterrupted sweep. **14/36 correct (38.9%)** vs
+Gemini's 12/19 (63.2%) on a smaller sample. But the interesting bits are
+in the tier breakdown and the bug that came before the run.
+
+### The bug: Cloudflare error 1010, "banned based on browser signature"
+
+First attempt returned HTTP 403 on *every* Groq call:
+
+    error code: 1010
+
+Curl to the same endpoint with the same key got HTTP 200. So the key was
+fine, the endpoint was fine — the client itself was being rejected. That
+error code is specifically Cloudflare's WAF flagging the caller's browser
+signature (User-Agent + TLS fingerprint) as bot-like and blocking it.
+
+The trigger: `urllib.request` sends `User-Agent: Python-urllib/3.13` by
+default, which is a well-known bot signature. Adding one line —
+
+    "User-Agent": "MSL-Bench/0.1 (+https://github.com/erika-goh/MSL-Bench)"
+
+— fixed it. Same-run confirmation: the 12 failure records the killed run
+had written got overwritten with real results as the re-run passed
+through them (`run_suite.py` writes to a deterministic per-problem path).
+
+**Root cause in one sentence:** Groq is Cloudflare-fronted; Gemini isn't.
+Same client code, different network path, one silently fails. Worth
+remembering — this class of "your HTTP library's UA gets bot-blocked" bug
+is invisible from unit tests and only shows up when you actually hit the
+upstream.
+
+### Finding worth keeping: Groq crushes T1 but stalls at MPS on T2
+
+| Tier | n | fast_0 | fast_1 |
+|---|---|---|---|
+| T1 elementwise | 12 | **100.0%** | 100.0% |
+| T2 reductions  | 9  | 22.2% | **0.0%** |
+| T3 tiled       | 8  | 0.0%  | 0.0% |
+| T4 fused       | 7  | 0.0%  | 0.0% |
+
+Two things stand out.
+
+**One:** Groq is perfect on T1 (12/12), beating Gemini (11/12 — Gemini
+missed p010_abs). The T1 elementwise wall is *not* a hard ceiling; it's
+model-dependent, and llama-3.3-70b is on the right side of it.
+
+**Two — and this is the honest lesson:** Groq's two T2 wins (`p101_row_sum`
+at 0.4× MPS, `p103_col_sum` at 0.3× MPS) are `fast_0` correct but
+`fast_1` failures. The fast_0/fast_1 split for T2 is **22.2% → 0.0%**.
+
+Before opening the kernel I predicted Groq was writing the naive "one
+thread per row" pattern — safe but leaves the GPU idle. Reading the
+actual generated kernel refuted that: it's the textbook halving-stride
+tree reduction, load-into-shared-memory-and-tree-reduce, structurally
+identical to what a competent CUDA kernel would look like. The perf
+loss is on a single line:
+
+    threadgroup_barrier(mem_flags::mem_device);
+
+That's the *wrong flag* for a threadgroup-scoped reduction. It should be
+`mem_flags::mem_threadgroup` — a fence over threadgroup memory only.
+`mem_device` forces a stronger fence over device memory across every
+iteration of the reduction, adding real synchronization cost on each
+halving step. This is a classic CUDA→MSL transfer-learning failure:
+CUDA's `__syncthreads()` has no flag parameter to get wrong, so the
+model doesn't know the flag is load-bearing and picks the "safer"
+(stronger, slower) option. Every halving step pays for a fence it
+doesn't need.
+
+So the T2 fast_0/fast_1 gap isn't "wrong algorithm" — it's "right
+algorithm, one MSL keyword off." That's a much more interesting finding
+than the naive-loop guess would have been:
+
+- Gemini: reaches for the right pattern (threadgroup memory, atomics),
+  gets the MSL syntax wrong at the *declaration* level (won't compile).
+- Groq: gets far enough that it compiles and produces the right numbers,
+  but picks the wrong barrier flag and pays for it every reduction step.
+
+The benchmark is separating these two failure modes cleanly. Correct-but-
+slow is a real signal, and it points at exactly the kind of one-token
+fix a repair loop should be able to make.
+
+### Finding worth keeping: T3/T4 attempts, verify-vs-compile mix
+
+Groq is 0/8 on T3 and 0/7 on T4 — no wins. But the failure *modes* differ:
+
+- Compile fails: 10 (mostly T3 matmul/conv, and the top of T4).
+- Verify fails: 5 (`p204_matmul_double_buffered_backfires`,
+  `p208_conv2d_5x5_tiled`, `p302_fused_linear_relu`, `p303_attention_head`,
+  `p304_attention_large`).
+
+Five kernels that compile AND run to completion but produce wrong numbers
+is not the same signal as five that don't compile. It means Groq is
+attempting the full structure — allocating threadgroup memory, computing
+tile indices, calling `threadgroup_barrier` — and getting close enough
+that the compiler accepts it. Off-by-one on tile bounds, wrong stride in
+a load, forgotten transpose — these are the *productive* failures. They're
+exactly what a repair loop should be able to fix, because the feedback
+signal ("your output differs from reference by ~X") is more actionable
+than "your file didn't compile."
+
+That maps directly to the Phase 5 flywheel plan: verify-failures are
+higher-value seed trajectories for a repair fine-tune than compile-failures
+are. And Groq — the *worse* overall model of the two — is producing more
+of them, because it's more willing to actually attempt the hard problems.
+
+### Smaller observations
+
+- **Free-tier ergonomics:** Groq's free tier ate all 36 problems in one
+  sweep with no rate-limit or quota interruptions. Gemini's daily quota
+  killed us at 19. This makes Groq the better *daily driver* for iteration
+  even though its raw accuracy is lower.
+- **fast_2 parity:** Both models hit fast_2 exactly once — p006_axpby's
+  fused MAD gets a 2.5× on both. Not a model-dependent win; it's just that
+  MPS's `torch.mul + torch.add` has enough dispatch overhead at 1M elements
+  that a single fused kernel beats it. Real 2× speedups are rare on this
+  benchmark.
+- **The overwrite-on-rerun property saved cleanup.** Because
+  `run_suite.py` writes to `results/raw/{run_tag}__{pid}.json`, the 12
+  bogus 403 records from the failed first attempt got silently replaced
+  by real records once the re-run passed through those problems. Nothing
+  to delete by hand. Worth remembering — write-path stability is a
+  disaster-recovery feature, not just a naming convention.
+
+### Decisions made
+
+- `USER_AGENT` string in `mkb/llm/providers.py` set to
+  `MSL-Bench/0.1 (+https://github.com/erika-goh/MSL-Bench)`. Applies to
+  every provider, not just Groq — Gemini and Ollama don't care, but the
+  default is now sane for any Cloudflare-fronted future provider.
+- Groq's baseline model for the leaderboard is `llama-3.3-70b-versatile`
+  (README default). Groq also offers `moonshotai/kimi-k2-instruct` and
+  `qwen/qwen3-32b`, which are plausibly stronger on code — worth a
+  follow-up run, but not this session.
+
+### Open items (carry into next session)
+
+- **Confirm the `mem_threadgroup` vs `mem_device` barrier-flag
+  hypothesis by hand-patching the Groq row_sum kernel** with the correct
+  flag and re-timing. If the fix takes the kernel from 0.4× to ≥ 1× MPS,
+  that's a concrete, blog-worthy first datapoint on where LLMs actually
+  break on MSL — and a natural repair-loop test case.
+- **Verify-fail kernels on T3/T4 are potential repair-loop seeds.** Five
+  of them exist now. Manually diffing one against a golden could tell us
+  whether they're off-by-one/stride-flip class errors (repair-friendly) or
+  fundamentally-wrong-algorithm class (repair-hostile).
+- **Try `moonshotai/kimi-k2-instruct` on Groq** for a second data point in
+  the same session-per-day slot. If it clears T2 at fast_1, that's a
+  provider-independent signal about model quality on MSL.
+
+---
+
 ## 2026-07-03 — First real Phase-3 leaderboard row: Gemini 2.5 Flash, one_shot, 19 problems
 
 Milestone day. The first ever LLM-vs-MPS leaderboard row for MSL-Bench
