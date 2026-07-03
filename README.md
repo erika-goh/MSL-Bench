@@ -72,13 +72,10 @@ Headline metric: **fast_p** — fraction of problems correct AND ≥ p× the MPS
 
 - One self-contained `.metal` file; kernel function named per the problem's `entry_point`
 - Buffers: inputs bound `[[buffer(0)]]..[[buffer(N-1)]]` in spec order, outputs continue the numbering
-- Launch config declared via magic comments (dispatchThreads is used — grid need not
-  be a multiple of the threadgroup):
-
-```metal
-// MKB_GRID: 1048576 1 1
-// MKB_TG: 256 1 1
-```
+- **Launch config is owned by the harness.** The prompt tells the model the grid and
+  threadgroup dimensions the harness will dispatch with; the kernel file must not
+  declare its own. `dispatchThreads` is used, so grid need not be a multiple of
+  threadgroup.
 
 ## Repository map
 

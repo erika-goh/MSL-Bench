@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from .. import problems as _problems
 from . import providers
 
 __all__ = ["build_prompt", "extract_metal", "one_shot", "repair_k"]
@@ -16,10 +17,10 @@ CONVENTIONS = """Conventions (required):
 2. The kernel function must be named `{entry_point}`.
 3. Buffer bindings: inputs in the order listed get [[buffer(0)]] .. [[buffer(N-1)]]; \
 outputs follow, continuing the numbering.
-4. Launch configuration (grid, threadgroup) is owned by the harness — do NOT \
-declare it inside the kernel file. Write the kernel for the grid stated in the \
-problem (the harness uses `dispatchThreads`, so grid need not be a multiple of \
-threadgroup).
+4. The harness dispatches with the grid and threadgroup dimensions given \
+under "Dispatch geometry" — do NOT declare launch config inside the kernel \
+file. The harness uses `dispatchThreads`, so grid need not be a multiple of \
+threadgroup.
 5. float32 unless stated otherwise. No host code — kernel file only."""
 
 TEMPLATE = """Write a Metal compute kernel for the following problem.
@@ -32,6 +33,9 @@ Inputs (bound in this order):
 
 Outputs (bound after inputs, in this order):
 {outputs}
+
+Dispatch geometry (fixed by the harness):
+{launch}
 
 {notes}
 
@@ -48,11 +52,20 @@ def build_prompt(problem: dict) -> list[dict]:
         f"  - buffer({n_in + i}) {x['name']}: shape {tuple(x['shape'])}, {x['dtype']}"
         for i, x in enumerate(problem["outputs"])
     )
+    grid, tg = _problems.launch_config(problem)
+    n_groups = tuple(-(-g // t) for g, t in zip(grid, tg))  # ceil-div per axis
+    launch = (
+        f"  - grid        = {grid}   (total threads dispatched, per axis)\n"
+        f"  - threadgroup = {tg}   (threads per group, per axis)\n"
+        f"  - -> {n_groups[0] * n_groups[1] * n_groups[2]} threadgroups total "
+        f"({' x '.join(str(n) for n in n_groups)})"
+    )
     user = TEMPLATE.format(
         title=problem["title"],
         description=problem["description"],
         inputs=inputs,
         outputs=outputs,
+        launch=launch,
         notes=f"Notes: {problem['notes']}" if problem.get("notes") else "",
         conventions=CONVENTIONS.format(entry_point=problem["entry_point"]),
     )
