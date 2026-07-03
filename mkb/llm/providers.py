@@ -32,7 +32,8 @@ def _post_json(url: str, payload: dict, headers: dict, retries: int = 3) -> dict
                 # free tiers rate-limit aggressively; back off and retry
                 time.sleep(15 * (attempt + 1))
                 continue
-            raise RuntimeError(f"HTTP {e.code} from {url}: {e.read().decode()[:500]}") from e
+            safe_url = url.split("?", 1)[0]  # Gemini puts the API key in the query string
+            raise RuntimeError(f"HTTP {e.code} from {safe_url}: {e.read().decode()[:500]}") from e
     raise RuntimeError("unreachable")
 
 
