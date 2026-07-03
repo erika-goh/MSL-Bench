@@ -140,20 +140,61 @@ and the sizes are the opposite of what I would have guessed:
    syntax transfer failure. Fixable via one-token repair feedback.
 2. **Missing SIMD-group idioms** (~8%): also measurable, also small —
    MSL-specific `simd_shuffle_down` intrinsic with no CUDA 1:1 analogue.
-   Fixable via idiom-level repair feedback ("use `simd_shuffle_down`
-   instead of the threadgroup-memory tree").
-3. **Missing memory-bandwidth idioms** (~50%): the big remainder —
-   vectorized loads, multi-row groups, sizing threadgroups to hide
-   latency. These aren't syntax mistakes; they're *design* mistakes.
-   The kernel structure itself is wrong for a memory-bound problem,
-   and no localized syntax fix would close this gap. Repair feedback
-   would need to say "restructure the kernel," not "fix this line."
+   Fixable via idiom-level repair feedback.
+3. **Remaining gap under spec's launch** (~50%): the big remainder,
+   but the diagnosis is subtler than "design mistake by the model."
+   See next section.
 
-This flips the story I wrote yesterday. The interesting phase-5
-question isn't "can the model learn MSL syntax from compiler
-feedback." It's "can the model learn *architectural* idioms about
-memory-bound vs compute-bound kernels from *runtime* feedback." Those
-are qualitatively different loops.
+To disentangle, wrote a float4-load variant under the spec's fixed
+launch (256 threads/group, 64 active + 192 idle, each active thread
+loads a `float4`). Expected: fewer memory transactions → real perf
+win. Result:
+
+    float4 loads (64 active threads):  kernel_ms=2.961, 90.5 GB/s
+    hand SIMD (256 threads, scalar):   kernel_ms=3.025, 88.7 GB/s
+
+Basically null. That 2% is inside timing noise. **Apple's memory
+subsystem already coalesces adjacent thread scalar loads into
+cache-line-sized transactions** — 256 threads × 1 float from
+consecutive addresses is the same wire pattern as 64 threads ×
+1 float4. Transaction count is not available as a knob under this
+launch.
+
+All four candidate kernels (Groq original, Groq patched, hand SIMD,
+hand float4) plateau at ~90 GB/s. MPS at 175 GB/s. **The ~90 GB/s
+number looks like the ceiling under the spec's fixed launch config
+(`one threadgroup per row, 256 threads per group`).** MPS is not
+bound by that spec — it picks its own launch — and it uses the
+freedom to run at ~2× the throughput.
+
+So the honest breakdown of layer 3 is not "50% design mistake by the
+model." It's:
+
+3a. **Cost under the spec's launch that the model *could* recover** —
+    small, dominated by layers 1 and 2 above (~15% combined).
+3b. **Cost inherent to the spec's launch** — the rest, ~35%. No LLM
+    output can close this half without violating the launch config
+    the problem hands it.
+
+That's a real finding about the benchmark itself, not about model
+quality. Layer 3b caps every kernel on p101 at ~0.5× MPS regardless
+of quality. If the point of the benchmark is to measure model kernel
+design, this cap is a bug: the "correct" answer looks like a failure
+because the benchmark's launch constraint prevents MPS-shaped designs.
+
+Options for the benchmark author to think about:
+- Let the candidate propose its own launch config (spec change).
+- Change the reference to a hand-tuned kernel that runs under the
+  *same* launch config — measure LLM-vs-optimal-under-constraint
+  rather than LLM-vs-unconstrained-MPS.
+- Accept the cap and interpret speedup as "% of the achievable
+  bandwidth under this launch" rather than "% of MPS."
+
+Refined Phase-5 framing: the interesting question isn't "can the
+model learn MSL syntax" (layer 1) or "can it learn Apple idioms"
+(layer 2). It's "**how much of the benchmark's speedup-vs-MPS metric
+is even reachable given the spec's launch constraint**" — which is
+a question about the benchmark, not about the model.
 
 - Gemini: reaches for the right pattern, gets the MSL syntax wrong
   at the *declaration* level (won't compile). Layer-1 failure.
@@ -225,18 +266,22 @@ of them, because it's more willing to actually attempt the hard problems.
 
 ### Open items (carry into next session)
 
-- **Write a bandwidth-optimized row_sum** (float4 loads + multiple rows
-  per threadgroup) and see if it can close the 2× bandwidth gap to
-  MPS. This is now the real question — the layer-3 finding above says
-  this is where the ~50% cost actually lives, and it's untested. If
-  we can hit ≥ 150 GB/s effective bandwidth with float4 loads, that
-  confirms the memory-bandwidth diagnosis and gives us a concrete
-  target for what "MSL-native design" looks like at the kernel level.
-- **Promote `/tmp/mkb_barrier_test/row_sum_simdgroup.metal` to
-  `tests/golden_kernels/row_sum.metal`** if we want it as a canonical
-  T2 reference. Held out for now because there's an obvious next
-  iteration (the float4/multi-row version) that would be a better
-  golden.
+- **Decide how to handle the spec-launch ceiling.** Layer 3b caps
+  p101 at ~0.5× MPS regardless of kernel quality. Three plausible
+  fixes: (a) let candidates propose launch configs; (b) time against
+  a same-launch reference kernel instead of MPS; (c) accept the cap
+  and change the metric wording. Each has different implications
+  for what the benchmark measures. Worth deliberate design choice
+  before Phase 4.
+- **Audit other T2/T3/T4 specs for the same constraint.** If p101's
+  launch is representative, several other problems may have baked-in
+  ceilings the metric hides. `p102_row_max`, `p104_row_softmax`, and
+  the matmuls in T3 all have hardcoded launch configs — worth
+  checking whether they leave room for MPS-shaped designs.
+- **Promote `/tmp/mkb_barrier_test/row_sum_simdgroup.metal` to a
+  reference kernel** (`tests/golden_kernels/row_sum.metal` or a new
+  dir like `tests/reference_kernels/`) if we adopt option (b) above.
+  It's a solid same-launch reference at 88.7 GB/s.
 - **Verify-fail kernels on T3/T4 are potential repair-loop seeds.** Five
   of them exist now. Manually diffing one against a golden could tell us
   whether they're off-by-one/stride-flip class errors (repair-friendly) or
