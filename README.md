@@ -95,7 +95,7 @@ tests/      portable tests (verify/score/timing) + Mac-only end-to-end harness t
 
 - [x] Phase 0 — vertical slice: harness end to end on 2 problems
 - [x] Phase 1 — timing trust: calibration discipline, interleaved A/B timing
-- [ ] Phase 2 — problem suite: ~60 problems across 4 tiers (elementwise → reductions → tiled → fused) *(36/60 landed: T1 ×12, T2 ×9, T3 ×8, T4 ×7)*
+- [x] Phase 2 — problem suite: 60 problems across 4 tiers (elementwise → reductions → tiled → fused) *(T1 ×15, T2 ×15, T3 ×15, T4 ×15)*
 - [ ] Phase 3 — LLM evaluation: one-shot vs repair@5 across free models *(one_shot done for Gemini + Groq; repair@5 in progress)*
 - [ ] Phase 4 — analysis: failure taxonomy, difficulty cliff, report + article *(findings landing in NOTES.md; formal writeup pending)*
 - [ ] Phase 5 — public demo: web leaderboard with kernel-vs-MPS side-by-side, live
