@@ -61,24 +61,57 @@ Before opening the kernel I predicted Groq was writing the naive "one
 thread per row" pattern — safe but leaves the GPU idle. Reading the
 actual generated kernel refuted that: it's the textbook halving-stride
 tree reduction, load-into-shared-memory-and-tree-reduce, structurally
-identical to what a competent CUDA kernel would look like. The perf
-loss is on a single line:
+identical to what a competent CUDA kernel would look like. The apparent
+perf loss is on a single line:
 
     threadgroup_barrier(mem_flags::mem_device);
 
-That's the *wrong flag* for a threadgroup-scoped reduction. It should be
-`mem_flags::mem_threadgroup` — a fence over threadgroup memory only.
-`mem_device` forces a stronger fence over device memory across every
-iteration of the reduction, adding real synchronization cost on each
-halving step. This is a classic CUDA→MSL transfer-learning failure:
-CUDA's `__syncthreads()` has no flag parameter to get wrong, so the
-model doesn't know the flag is load-bearing and picks the "safer"
-(stronger, slower) option. Every halving step pays for a fence it
-doesn't need.
+That's arguably the *wrong flag* for a threadgroup-scoped reduction —
+`mem_flags::mem_threadgroup` fences over threadgroup memory only, while
+`mem_device` also forces a device-memory fence on every iteration of
+the reduction. `__syncthreads()` in CUDA has no flag parameter to get
+wrong, so the model doesn't know the flag is load-bearing and picks the
+"safer" (stronger) option. But how much does that actually cost?
 
-So the T2 fast_0/fast_1 gap isn't "wrong algorithm" — it's "right
-algorithm, one MSL keyword off." That's a much more interesting finding
-than the naive-loop guess would have been:
+**Hand-patched the flag, re-ran through the A/B/A single-problem
+runner. Result:** kernel_ms went from **3.584 ms → 3.317 ms**, a
+**7.4% improvement**. Real, but much smaller than the CUDA→MSL story
+would predict.
+
+    baseline (mem_device):     kernel_ms=3.584, speedup=0.427x
+    patched  (mem_threadgroup): kernel_ms=3.317, speedup=0.539x
+
+(The speedup ratio jumped 26% because MPS's reference_ms also drifted
+17% between the two runs — MPS timing is noisier than kernel timing.
+The raw kernel_ms is the honest number. Within-run A/B/A block delta
+was 0.0000 and 0.0001 respectively — the 7.4% is signal, not noise.)
+
+**Why isn't the fix bigger?** Best guess: Apple's compiler is smart
+enough to fold part of the unnecessary device-scope fence away when
+it sees no device writes in the fence region. So the "wrong flag"
+costs some real perf but doesn't dominate. The dominant gap — from
+3.3 ms down to something ≤ 1.5 ms that would actually beat MPS — is
+not about the barrier flag at all. It's about MSL-specific idioms
+the model didn't reach for:
+
+- SIMD-group reductions via `simd_shuffle_down` (Apple GPUs have
+  32-lane SIMD groups; K=256 is 8 SIMD groups per threadgroup, so
+  the halving-tree could collapse to just 3 shuffle steps + one
+  cross-SIMD barrier instead of 8 threadgroup-wide barriers).
+- Loading 2 or 4 elements per thread and reducing register-locally
+  before the tree even starts.
+- Skipping threadgroup memory entirely and going pure-SIMD.
+
+None of these have CUDA analogues that map 1:1, which is exactly the
+Metal-vs-CUDA gap this benchmark exists to measure. Refined lesson:
+
+- Gemini: reaches for the right pattern (threadgroup memory, atomics),
+  gets the MSL syntax wrong at the *declaration* level (won't compile).
+- Groq: gets the right pattern to compile and produce correct output,
+  but stops at "port from CUDA" instead of reaching for Apple-specific
+  idioms. Correct kernel, ~7% cost from the wrong barrier flag,
+  ~50% cost from missing SIMD-group reductions and register-local
+  pre-reduce.
 
 - Gemini: reaches for the right pattern (threadgroup memory, atomics),
   gets the MSL syntax wrong at the *declaration* level (won't compile).
@@ -144,11 +177,13 @@ of them, because it's more willing to actually attempt the hard problems.
 
 ### Open items (carry into next session)
 
-- **Confirm the `mem_threadgroup` vs `mem_device` barrier-flag
-  hypothesis by hand-patching the Groq row_sum kernel** with the correct
-  flag and re-timing. If the fix takes the kernel from 0.4× to ≥ 1× MPS,
-  that's a concrete, blog-worthy first datapoint on where LLMs actually
-  break on MSL — and a natural repair-loop test case.
+- **Write a golden SIMD-group row_sum** (using `simd_shuffle_down` for
+  intra-SIMD reduce + one threadgroup barrier for cross-SIMD) and time
+  it against the same p101 problem. If it beats MPS at 1.5 ms, we have
+  a concrete target kernel to compare LLM output against — and a real
+  measurement of "what does knowing Apple-specific idioms actually
+  buy you on this benchmark." That's the interesting Phase-5 datapoint,
+  bigger than the 7% barrier-flag win.
 - **Verify-fail kernels on T3/T4 are potential repair-loop seeds.** Five
   of them exist now. Manually diffing one against a golden could tell us
   whether they're off-by-one/stride-flip class errors (repair-friendly) or
