@@ -19,11 +19,17 @@ import urllib.error
 import urllib.request
 
 
+USER_AGENT = "MSL-Bench/0.1 (+https://github.com/erika-goh/MSL-Bench)"
+
+
 def _post_json(url: str, payload: dict, headers: dict, retries: int = 3) -> dict:
+    # Groq is fronted by Cloudflare, which 403s the default `Python-urllib/x.y`
+    # UA as a bot signature (error 1010). A real UA gets us through.
     body = json.dumps(payload).encode()
     for attempt in range(retries):
         req = urllib.request.Request(url, data=body, method="POST",
-                                     headers={"Content-Type": "application/json", **headers})
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": USER_AGENT, **headers})
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 return json.loads(resp.read().decode())
