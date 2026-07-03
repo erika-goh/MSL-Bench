@@ -94,10 +94,10 @@ tests/      portable tests (verify/score/timing) + Mac-only end-to-end harness t
 ## Roadmap
 
 - [x] Phase 0 — vertical slice: harness end to end on 2 problems
-- [ ] Phase 1 — timing trust: calibration discipline, interleaved A/B timing
-- [ ] Phase 2 — problem suite: ~60 problems across 4 tiers (elementwise → reductions → tiled → fused)
-- [ ] Phase 3 — LLM evaluation: one-shot vs repair@5 across free models
-- [ ] Phase 4 — analysis: failure taxonomy, difficulty cliff, report + article
+- [x] Phase 1 — timing trust: calibration discipline, interleaved A/B timing
+- [ ] Phase 2 — problem suite: ~60 problems across 4 tiers (elementwise → reductions → tiled → fused) *(36/60 landed: T1 ×12, T2 ×9, T3 ×8, T4 ×7)*
+- [ ] Phase 3 — LLM evaluation: one-shot vs repair@5 across free models *(one_shot done for Gemini + Groq; repair@5 in progress)*
+- [ ] Phase 4 — analysis: failure taxonomy, difficulty cliff, report + article *(findings landing in NOTES.md; formal writeup pending)*
 - [ ] Phase 5 — public demo: web leaderboard with kernel-vs-MPS side-by-side, live
       latency bars, failure-class heatmap, and a "watch the kernel run" view.
       Positioning: *"A benchmark that measures how well LLMs write GPU kernels —

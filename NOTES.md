@@ -5,6 +5,120 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-03 (evening) — repair@5 sweeps: both providers quota-die + the "repair adds zero new correct" finding
+
+Ran `repair@5` for Groq llama-3.3-70b and Gemini 2.5 Flash to answer
+the Phase-3 headline question: does compiler-diagnostic feedback let
+the model unstick itself past the T2 compile-wall? Both providers
+died on quota mid-sweep — this is now the second same-day quota kill
+for both free tiers this session. Salvaged records: **Groq 17/36, Gemini 2/36.**
+
+Groq daily hit at 98991/100000 tokens (TPD limit) after the last
+attempt of p105. Gemini quotaed immediately (429) after p001 — its
+daily bucket was already consumed by this session's earlier one_shot
+sweep. Neither refills in a useful window, so this is what we have.
+
+### The finding worth the whole session: repair adds zero new correct kernels
+
+Aggregate leaderboard headline looks like a win: Groq repair 82.4%
+correct vs one_shot 38.9%. This is misleading. Repair only ran on
+17/36 problems (the easier subset); one_shot ran on the full 36.
+Apples-to-apples on the same 17 problems, one_shot was **also 14/17**.
+The full side-by-side:
+
+    T1 (12 problems): 12/12 pass in both modes. Repair mode was
+      indistinguishable from one_shot (attempts=1 on 11 of 12).
+
+    T2 (5 problems, subset): both modes got 2/5. But the failure
+      modes changed on 2 of them:
+
+        p102_row_max      one_shot: compile-fail → repair@5: verify-fail
+        p104_row_softmax  one_shot: compile-fail → repair@5: verify-fail
+        p105_col_sum_tn   (repair got token-quota provider_error)
+
+**Repair converts compile-fails into verify-fails but does not add
+correct kernels.** That's the whole story. The compile diagnostics
+guided the model past MSL syntax errors, and by the 5th attempt it
+had a kernel that compiles + runs + produces *some* output. But the
+output is wrong, and the "your output differs from reference" feedback
+alone isn't enough to get from wrong-numerically to right-numerically.
+
+This maps directly onto the barrier-flag finding from earlier today:
+
+- **Layer 1** errors (barrier-flag confusion, missing keyword, wrong
+  type annotation) — the compiler *tells* the model exactly what's
+  wrong. Repair fixes these.
+- **Layer 2** errors (missing MSL idioms, wrong reduction pattern)
+  — the compiler is silent, the code runs, but the semantics are
+  wrong. Repair only sees "wrong answer, max_abs_err=X" — not enough
+  signal to point at the specific line.
+- **Layer 3** errors (memory-bandwidth design, launch-shape choices)
+  — invisible to both compile and verify signals. Would require
+  performance feedback, which repair doesn't currently provide.
+
+Groq's repair loop cleanly demonstrated layer-1 fixability and
+layer-2 hard-stop. That's a concrete Phase-4 finding: **the value of
+repair@5 with only compile+correctness signal is bounded above by
+"unstick the model when compile errors were the whole problem."**
+For anything past that, the feedback channel needs richer signal.
+
+### Aside: the leaderboard misrepresents partial-sample rows
+
+Groq repair (n=17) at 82.4% and Groq one_shot (n=36) at 38.9% are
+NOT directly comparable — the 17 is a strict prefix of the 36 and
+skewed toward the easy tiers. The leaderboard column shows n but
+doesn't flag the overlap.
+
+For Phase 4, `make_leaderboard.py` should probably grow either:
+- an `n_shared` column (how many problems overlap the reference run), OR
+- explicit "on same subset" delta rows, OR
+- refuse to render rows with n < some threshold or n < max(n) - K.
+
+Leaving as-is for this session — the data is honest, the
+interpretation needs care. Both are captured in this note.
+
+### Provider-error cells worth remembering
+
+- `p105_col_sum_tiled_naive` in Groq repair: `provider_error`, false
+  negative from the token-quota kill mid-attempt.
+- `p002_relu` in Gemini repair: `provider_error`, same class of
+  false negative from Gemini's quota kill after p001.
+
+Both are recorded as `e` glyphs on the leaderboard, distinct from
+`c/r/v/n` kernel failures. Anyone reading the raw records sees the
+error string inline in the transcript.
+
+### Decisions made
+
+- README roadmap checkboxes updated: Phase 1 done, Phase 2 marked
+  at 36/60 in-progress, Phase 3 marked at "one_shot done + repair
+  partial" in-progress.
+- Not pushing to retry Groq's quota via 20-min waits — the "rolling
+  window" refill is ~1000 tokens per 20 min, which won't cover
+  ~19 remaining repair problems (each of which can burn 5000+ tokens
+  across 5 attempts).
+- Ollama repair@5 sweep left as future work — would need thermal-
+  safety confirmation given the concurrent local LLM + kernel-eval
+  GPU load.
+
+### Open items (carry into next session)
+
+- **Ollama qwen2.5-coder-14b repair@5 sweep** — the only remaining
+  provider option for repair data today is fully local. Needs
+  thermal-safety greenlight before starting; sweep would take
+  ~45-60 min with heavy sustained GPU load (local model inference
+  + kernel eval, both on the same M-series GPU).
+- **Enhance make_leaderboard.py to flag partial-sample rows.**
+  Either an `n_shared` column, an "on same subset" comparison row,
+  or a rendering rule that hides rows below a threshold.
+- **Feed richer feedback into repair.** Layer-2 fixability might
+  become possible if the feedback surface includes not just
+  "max_abs_err=X" but per-element diff previews, or shape mismatch
+  hints. Worth prototyping on p102 (the row_max problem where 5
+  attempts of numeric-only feedback wasn't enough).
+
+---
+
 ## 2026-07-03 (later) — Groq row lands + Cloudflare bot-signature bug
 
 Second Phase-3 leaderboard row: `llama-3.3-70b-versatile` (Groq), one_shot,
