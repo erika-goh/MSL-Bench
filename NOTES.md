@@ -89,29 +89,77 @@ was 0.0000 and 0.0001 respectively — the 7.4% is signal, not noise.)
 **Why isn't the fix bigger?** Best guess: Apple's compiler is smart
 enough to fold part of the unnecessary device-scope fence away when
 it sees no device writes in the fence region. So the "wrong flag"
-costs some real perf but doesn't dominate. The dominant gap — from
-3.3 ms down to something ≤ 1.5 ms that would actually beat MPS — is
-not about the barrier flag at all. It's about MSL-specific idioms
-the model didn't reach for:
+costs some real perf but doesn't dominate.
 
-- SIMD-group reductions via `simd_shuffle_down` (Apple GPUs have
-  32-lane SIMD groups; K=256 is 8 SIMD groups per threadgroup, so
-  the halving-tree could collapse to just 3 shuffle steps + one
-  cross-SIMD barrier instead of 8 threadgroup-wide barriers).
-- Loading 2 or 4 elements per thread and reducing register-locally
-  before the tree even starts.
-- Skipping threadgroup memory entirely and going pure-SIMD.
+The next natural question: is the *dominant* remaining gap explained
+by missing SIMD-group idioms? Wrote a hand-tuned kernel to find out:
+one threadgroup per row, intra-SIMD reduce via `simd_shuffle_down`
+(5 shuffle steps register-to-register, zero memory), one threadgroup
+barrier to publish 8 per-SIMD partial sums, then a cross-SIMD reduce
+using the first SIMD group. That's 8 shuffles + 1 barrier instead of
+the original tree's 8 barriers + 8 shared-memory read/write rounds.
 
-None of these have CUDA analogues that map 1:1, which is exactly the
-Metal-vs-CUDA gap this benchmark exists to measure. Refined lesson:
+    hand-tuned SIMD-group kernel:  kernel_ms=3.025, speedup=0.507x
 
-- Gemini: reaches for the right pattern (threadgroup memory, atomics),
-  gets the MSL syntax wrong at the *declaration* level (won't compile).
-- Groq: gets the right pattern to compile and produce correct output,
-  but stops at "port from CUDA" instead of reaching for Apple-specific
-  idioms. Correct kernel, ~7% cost from the wrong barrier flag,
-  ~50% cost from missing SIMD-group reductions and register-local
-  pre-reduce.
+Compared to Groq's baseline (3.584) that's another 8% off the kernel
+time — real, but again nothing close to closing the gap to MPS (1.53
+ms). Let's do the arithmetic on where the time actually goes.
+
+**The bandwidth-bound math.** p101_row_sum reads 262144×256×4 =
+268 MB from device memory (output is negligible). Effective bandwidth
+achieved:
+
+| kernel                        | ms    | effective GB/s |
+|-------------------------------|-------|----------------|
+| Groq original (mem_device)    | 3.584 | 74.8           |
+| Groq patched (mem_threadgroup)| 3.317 | 80.9           |
+| Hand-tuned SIMD-group         | 3.025 | 88.7           |
+| MPS reference                 | 1.53  | ~175           |
+
+MPS is achieving **~2× the effective memory bandwidth** of my
+hand-written kernel. At K=256 with random floats and no meaningful
+compute per element, this problem is memory-bound. All three
+hand-written kernels are leaving half the memory bandwidth on the
+table, and the barrier-flag and SIMD-group choices only move the
+needle within that half.
+
+MPS is almost certainly doing at least some of:
+- **Vectorized loads** (`float4` / `float2`) — one memory transaction
+  returns 4 elements instead of 1, so the number of device-memory
+  ops drops by 4×.
+- **Multiple rows per threadgroup** — one 512- or 1024-thread group
+  processes 2 or 4 rows at once, improving cache line utilization
+  and amortizing launch overhead.
+- **Larger threadgroups** to hide memory latency by keeping more
+  requests in flight.
+
+Refined lesson — the LLM-vs-MPS gap on reductions has three layers,
+and the sizes are the opposite of what I would have guessed:
+
+1. **Barrier-flag confusion** (7%): measurable, small — CUDA→MSL
+   syntax transfer failure. Fixable via one-token repair feedback.
+2. **Missing SIMD-group idioms** (~8%): also measurable, also small —
+   MSL-specific `simd_shuffle_down` intrinsic with no CUDA 1:1 analogue.
+   Fixable via idiom-level repair feedback ("use `simd_shuffle_down`
+   instead of the threadgroup-memory tree").
+3. **Missing memory-bandwidth idioms** (~50%): the big remainder —
+   vectorized loads, multi-row groups, sizing threadgroups to hide
+   latency. These aren't syntax mistakes; they're *design* mistakes.
+   The kernel structure itself is wrong for a memory-bound problem,
+   and no localized syntax fix would close this gap. Repair feedback
+   would need to say "restructure the kernel," not "fix this line."
+
+This flips the story I wrote yesterday. The interesting phase-5
+question isn't "can the model learn MSL syntax from compiler
+feedback." It's "can the model learn *architectural* idioms about
+memory-bound vs compute-bound kernels from *runtime* feedback." Those
+are qualitatively different loops.
+
+- Gemini: reaches for the right pattern, gets the MSL syntax wrong
+  at the *declaration* level (won't compile). Layer-1 failure.
+- Groq: gets the right pattern to compile and produce correct
+  output, but stops at "port from CUDA." Layer-1 + layer-2 costs,
+  and skips layer-3 entirely.
 
 - Gemini: reaches for the right pattern (threadgroup memory, atomics),
   gets the MSL syntax wrong at the *declaration* level (won't compile).
@@ -177,13 +225,18 @@ of them, because it's more willing to actually attempt the hard problems.
 
 ### Open items (carry into next session)
 
-- **Write a golden SIMD-group row_sum** (using `simd_shuffle_down` for
-  intra-SIMD reduce + one threadgroup barrier for cross-SIMD) and time
-  it against the same p101 problem. If it beats MPS at 1.5 ms, we have
-  a concrete target kernel to compare LLM output against — and a real
-  measurement of "what does knowing Apple-specific idioms actually
-  buy you on this benchmark." That's the interesting Phase-5 datapoint,
-  bigger than the 7% barrier-flag win.
+- **Write a bandwidth-optimized row_sum** (float4 loads + multiple rows
+  per threadgroup) and see if it can close the 2× bandwidth gap to
+  MPS. This is now the real question — the layer-3 finding above says
+  this is where the ~50% cost actually lives, and it's untested. If
+  we can hit ≥ 150 GB/s effective bandwidth with float4 loads, that
+  confirms the memory-bandwidth diagnosis and gives us a concrete
+  target for what "MSL-native design" looks like at the kernel level.
+- **Promote `/tmp/mkb_barrier_test/row_sum_simdgroup.metal` to
+  `tests/golden_kernels/row_sum.metal`** if we want it as a canonical
+  T2 reference. Held out for now because there's an obvious next
+  iteration (the float4/multi-row version) that would be a better
+  golden.
 - **Verify-fail kernels on T3/T4 are potential repair-loop seeds.** Five
   of them exist now. Manually diffing one against a golden could tell us
   whether they're off-by-one/stride-flip class errors (repair-friendly) or
