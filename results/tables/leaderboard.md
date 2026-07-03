@@ -2,11 +2,13 @@
 
 | Run | n | fast_0 (correct) | fast_1 (≥MPS) | fast_2 (≥2×MPS) |
 |---|---|---|---|---|
-| gemini_gemini-2.5-flash_one_shot | 19 | 63.2% | 63.2% | 5.3% |
-| gemini_gemini-2.5-flash_repair | 2 | 50.0% | 50.0% | 0.0% |
 | groq_llama-3.3-70b-versatile_one_shot | 36 | 38.9% | 33.3% | 2.8% |
-| groq_llama-3.3-70b-versatile_repair | 17 | 82.4% | 70.6% | 5.9% |
-| ollama_qwen2.5-coder-14b_one_shot | 6 | 0.0% | 0.0% | 0.0% |
+| gemini_gemini-2.5-flash_one_shot | 19† | 63.2% | 63.2% | 5.3% |
+| groq_llama-3.3-70b-versatile_repair | 17† | 82.4% | 70.6% | 5.9% |
+| ollama_qwen2.5-coder-14b_one_shot | 6† | 0.0% | 0.0% | 0.0% |
+| gemini_gemini-2.5-flash_repair | 2† | 50.0% | 50.0% | 0.0% |
+
+† partial sample (n < 36). Aggregate percentages are not directly comparable to full-suite rows — the subset is typically biased toward earlier/easier tiers.
 
 ## Per-tier breakdown
 
