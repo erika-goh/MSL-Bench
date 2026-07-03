@@ -92,24 +92,34 @@ def main() -> None:
             continue
         print(f"[{run_tag}] {pid} ...", flush=True)
 
-        if args.mode == "one_shot":
-            gen = one_shot(args.provider, problem, args.model)
-            if gen["kernel"] is None:
-                rec = {"success": False, "metrics": {"stage": "no_code"}, "attempts": 1}
+        try:
+            if args.mode == "one_shot":
+                gen = one_shot(args.provider, problem, args.model)
+                if gen["kernel"] is None:
+                    rec = {"success": False, "metrics": {"stage": "no_code"}, "attempts": 1}
+                else:
+                    ok, fb, metrics = evaluate_kernel(gen["kernel"], problem, reference)
+                    rec = {"success": ok, "feedback": fb, "metrics": metrics, "attempts": 1}
+                transcript = gen["transcript"]
             else:
-                ok, fb, metrics = evaluate_kernel(gen["kernel"], problem, reference)
-                rec = {"success": ok, "feedback": fb, "metrics": metrics, "attempts": 1}
-            transcript = gen["transcript"]
-        else:
-            def feedback_fn(src: str):
-                ok, fb, metrics = evaluate_kernel(src, problem, reference)
-                feedback_fn.last_metrics = metrics  # type: ignore[attr-defined]
-                return ok, fb
-            gen = repair_k(args.provider, problem, feedback_fn, k=args.k, model=args.model)
-            rec = {"success": gen["success"],
-                   "metrics": getattr(feedback_fn, "last_metrics", {}),
-                   "attempts": gen["attempts"]}
-            transcript = gen["transcript"]
+                def feedback_fn(src: str):
+                    ok, fb, metrics = evaluate_kernel(src, problem, reference)
+                    feedback_fn.last_metrics = metrics  # type: ignore[attr-defined]
+                    return ok, fb
+                gen = repair_k(args.provider, problem, feedback_fn, k=args.k, model=args.model)
+                rec = {"success": gen["success"],
+                       "metrics": getattr(feedback_fn, "last_metrics", {}),
+                       "attempts": gen["attempts"]}
+                transcript = gen["transcript"]
+        except Exception as e:
+            # A single provider / evaluator error should not terminate the whole
+            # suite — record it as this problem's failure and continue.
+            err = f"{type(e).__name__}: {str(e)[:500]}"
+            print(f"    !! {err}", flush=True)
+            rec = {"success": False,
+                   "metrics": {"stage": "provider_error", "error": err},
+                   "attempts": 1}
+            transcript = [{"role": "error", "content": err}]
 
         record = {
             "run": run_tag, "problem": pid, "tier": problem["tier"],

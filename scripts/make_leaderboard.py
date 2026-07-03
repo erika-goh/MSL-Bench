@@ -19,6 +19,7 @@ STAGE_GLYPH = {
     "runtime": "r",
     "verify": "v",
     "no_code": "n",
+    "provider_error": "e",
 }
 NOT_RUN = "·"
 
@@ -70,7 +71,7 @@ def _problem_status_section(runs: dict[str, list[dict]]) -> list[str]:
     lines = ["## Per-problem failure stage",
              "",
              "Legend: `✓` correct · `c` compile · `r` runtime · `v` verify · "
-             "`n` no code emitted · `·` not run.",
+             "`n` no code emitted · `e` provider/harness error · `·` not run.",
              ""]
 
     header = ["Problem", "T"] + run_names + ["✓/n"]

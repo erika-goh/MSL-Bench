@@ -28,8 +28,10 @@ def _post_json(url: str, payload: dict, headers: dict, retries: int = 3) -> dict
             with urllib.request.urlopen(req, timeout=180) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < retries - 1:
-                # free tiers rate-limit aggressively; back off and retry
+            transient = e.code == 429 or 500 <= e.code < 600
+            if transient and attempt < retries - 1:
+                # 429 = rate-limited, 5xx = transient upstream error;
+                # both are worth retrying with backoff before giving up.
                 time.sleep(15 * (attempt + 1))
                 continue
             safe_url = url.split("?", 1)[0]  # Gemini puts the API key in the query string
