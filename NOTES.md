@@ -5,6 +5,151 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-03 — First real Phase-3 leaderboard row: Gemini 2.5 Flash, one_shot, 19 problems
+
+Milestone day. The first ever LLM-vs-MPS leaderboard row for MSL-Bench
+landed — 19 problems evaluated end-to-end, tier gradient visible in the
+numbers, and two of the "infra will pay off later" patches from last
+session earned their keep within their first hour of use.
+
+### What got built
+
+Two small resilience patches surfaced by the run itself, then the run:
+
+| commit | what |
+|---|---|
+| (this session) | `_post_json` retries 5xx as well as 429 — one-line broadening of the retry condition. |
+| (this session) | `run_suite.py` wraps the per-problem body in try/except, records `fail_stage="provider_error"` and continues. `make_leaderboard.py` learned the new `e` glyph. |
+| (this session) | Ran `gemini-2.5-flash` one_shot across (up to) 33 remaining problems. Got 19 clean records before Google's daily quota killed the connection. |
+
+The two patches both fired *during their first run*: an HTTP 503 hit on
+p004 after 3 successes (would have terminated the whole suite without
+patch #1), and two HTTP 429s on p108/p109 after quota exhaustion (would
+have terminated without patch #2). Without either fix we'd have ended up
+with 3-8 records instead of 21. Cheap infra that paid off same-session.
+
+### Finding worth keeping: the T1→T2 cliff is real and clean
+
+| Tier | n | fast_0 | fast_1 | fast_2 |
+|---|---|---|---|---|
+| T1 elementwise | 12 | **91.7%** | 91.7% | 8.3% |
+| T2 reductions  | 7  | **14.3%** | 14.3% | 0.0% |
+
+92% → 14% correctness in one tier boundary. The KernelBench thesis
+("LLMs can do elementwise, break on cross-thread coordination")
+reproducing cleanly on the Metal side. Only p104_row_softmax passed T2;
+every other T2 attempt failed at compile (5×) or emitted no code (1×).
+
+The cliff isn't about difficulty per se — it's about whether the model
+has to know Metal-specific constructs. T1 kernels are one-line
+translations of C math (`out[i] = f(x[i])`). T2 kernels *require*
+threadgroup memory, barriers, or atomics — all of which have MSL-specific
+names and idioms that CUDA training data doesn't cover directly. That's
+the entire benchmark thesis, and now there's a headline number for it.
+
+### Finding worth keeping: fast_1 == fast_0 across the board
+
+Every single problem the model got correct also matched-or-beat MPS
+(fast_1 = fast_0 exactly, both tiers). Meanwhile fast_2 = 5.3% —
+essentially zero. So the picture is:
+
+- MPS's per-dispatch overhead is real enough at these problem sizes
+  that *any* hand-written kernel that does the actual math is ≥ MPS.
+- But *doubling* MPS requires either fusion (p006 axpby's fused MAD,
+  the sole 2.5× outlier) or a genuine algorithmic win — neither of
+  which the model is producing in one shot.
+
+Sharpens the article thesis nicely: **it's not that LLMs write slow
+kernels; it's that they write correct-but-generic kernels that don't
+exploit anything MPS isn't already doing.** The gap between "compiled &
+correct" and "fast" is where the interesting engineering lives, and
+that's exactly where one_shot LLMs sit.
+
+### Finding worth keeping: p010_abs — C vs. C++ math library naming
+
+p010_abs was the *only* T1 failure. Trivial elementwise:
+`out[i] = fabsf(x[i])`. Compile error. Why?
+
+Metal's `metal_stdlib` is **C++-based**, so it exposes C++-style
+overloaded names: `abs()`, `fabs()`, `exp()`, `sqrt()`. What it does *not*
+have is the plain-C `<math.h>` type-suffixed forms `fabsf`, `expf`,
+`sqrtf`. Gemini reached for `fabsf` — the CUDA/C bias in its training
+data — and the compiler rejected it. This is the **same failure class**
+as last session's p013_gelu finding (`erf` missing from metal_stdlib).
+
+Concept worth explaining: **Metal's stdlib is a subset of C++, not C.**
+When translating from CUDA (which historically permitted both C and C++
+math names) or from CPU code, models pattern-match on the C names and
+lose. Every future "why did this trivial kernel fail" investigation
+should check math-function naming first.
+
+### Finding worth keeping: no_code responses are a real category
+
+p106_col_sum_atomic came back with **no parseable ```metal fence** —
+Gemini emitted prose or a differently-fenced code block that
+`extract_metal` couldn't recognize. Never happened in the ollama smoke
+test (qwen always fenced). Small (1/19) but non-zero, and the
+one_shot mode has no recovery from it. `repair@k` mode does — the first
+retry prompt explicitly asks for the code fence.
+
+### Decisions made
+
+- **Kept the 6 stale ollama records in `results/raw/`** — they're honest
+  data from an earlier smoke test, and having a second run enables the
+  leaderboard's "unbeaten problems" callout (which needs n_runs ≥ 2).
+  They land in the tables as a second column and don't pollute anything.
+- **Deleted the 2 `provider_error` records (p108, p109) before generating
+  the leaderboard** — a 429 wall from our free-tier quota is not a
+  measurement of the model's kernel-writing ability, and including them
+  would depress the T2 pass rate by two artificial failures. Records are
+  gitignored so this is a local-only cleanup, but the principle matters:
+  **provider_error is missing data, not a failed measurement.** Same
+  reason you'd exclude a benchmark iteration where the wall clock
+  jumped due to a laptop sleep.
+- **Chose `gemini-2.5-flash` over `2.0-flash` for the run** — 2.0 was
+  already quota-saturated on the first preflight ping (45s of 429 retry
+  before giving up). 2.5 had fresh capacity AND is the newer, stronger
+  model, so it's the honest choice for a first leaderboard row anyway.
+- **Stopped the run at the second consecutive 429** instead of letting
+  it grind through the remaining ~15 problems at 45s of retry-and-fail
+  each. Rate-limit walls compound.
+
+### Open items (carry into next session)
+
+- **~17 problems still unmeasured** for gemini-2.5-flash: p108/p109
+  (T2), all 8 of T3, all 7 of T4. Waiting on quota reset OR a
+  `GROQ_API_KEY`. When quota resets, resume with `--only` on those.
+- **`provider_error` handling in `make_leaderboard.py`** — right now we
+  hand-delete those records to keep the leaderboard honest. Could instead
+  add a filter in `fast_p` / `tier_table` that excludes them from the
+  denominator. Not urgent, but the manual cleanup is a papercut.
+- **`repair@k` mode not yet exercised at all.** The whole point of the
+  Phase-3 design is comparing one_shot vs repair@5. Only one_shot has
+  data. The 8 T2 compile failures are exactly the class of error where
+  a compile-diagnostic-in-the-loop repair prompt could recover; that
+  comparison is the meat of the article and it hasn't been measured.
+- **`extract_metal` couldn't parse Gemini's p106 response.** Worth
+  looking at what fence it used — might be a fence style (`` ```C++ ``
+  perhaps) that we could add to the regex, cheaply widening the "no_code"
+  moat for the whole benchmark. Or it might be genuine prose (no code)
+  in which case there's nothing to do.
+- **One_shot records don't preserve the compile-error text** — the
+  `feedback` string exists in `evaluate_kernel`'s return but never lands
+  in the saved record. For T2 failure analysis (what compile errors did
+  Gemini produce?) we'd have to re-run and log, or add the field. Small
+  ergonomic gap.
+- **Prompt hint policy still holding** — no hints about `threadgroup`,
+  `abs` vs `fabsf`, or math naming. The p010 and p106 findings are the
+  proof that hints would leak signal. Reaffirmed.
+
+### Catalog state
+
+Unchanged — 36 problems total. 19 now have a gemini-2.5-flash one_shot
+data point; the other 17 pending quota reset. Leaderboard file
+regenerated at `results/tables/leaderboard.md`.
+
+---
+
 ## 2026-07-02 — Phase-3 scaffolding session: no new kernels, four infra commits
 
 First session where thermal caution was the explicit framing from the
