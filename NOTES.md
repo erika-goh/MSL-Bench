@@ -5,6 +5,108 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-04 (dawn) — two more Groq models, cross-model comparison sharpens the story
+
+Ran two more providers on Groq's fresh per-model quota buckets after
+llama-3.3-70b exhausted its daily TPD:
+
+    Groq qwen/qwen3-32b       one_shot  36/60  (paused for cool-down)
+    Groq llama-3.1-8b-instant one_shot  60/60  (first full sweep!)
+
+Two cross-model findings landed that sharpen the Phase-4 story:
+
+### Metal elementwise fits in an 8B model
+
+Both 8B and 70B llama variants hit **100%** on T1. The MSL knowledge
+needed to write `out[i] = f(x[i])` correctly is compact — fits in 8B
+params, doesn't need 70B. Bigger models retain an edge only at T2+
+(llama-3.3-70b: 22.2%, llama-3.1-8b: 6.7% on T2), where MSL-specific
+patterns like threadgroup memory, barriers, and atomics start to
+matter. That's a real finding for anyone deciding what size model to
+target for GPU kernel generation: **the elementwise floor is cheap;
+the T2+ ceiling is what buys parameters**.
+
+### Reasoning-optimized may be actively harmful on niche syntax
+
+qwen3-32b was the ONLY model in the set that failed T1. **3/15 T1
+pass**, all others 100% or 91.7%. Sampled its transcripts: dominant
+failure mode is using `thread_position_in_grid` as a free variable
+(OpenCL/CUDA-style) instead of a Metal parameter attribute like
+`uint id [[thread_position_in_grid]]`. Consistent across problems.
+
+Reading the `<think>` blocks reveals the mechanism: qwen3 *derives*
+thread-index handling from CUDA/OpenCL knowledge, applying an
+adjacent-domain pattern confidently. It's not lacking Metal
+knowledge — it's actively overwriting Metal knowledge with reasoned-
+from-adjacent-language reasoning.
+
+Non-reasoning models that just pattern-match "the closest Metal
+example from training data" get the parameter-attribute syntax right
+by not thinking about it. Reasoning helps when the domain is familiar
+enough that the derivation lands in the right place. On niche
+territory like Metal, reasoning can be a Trojan horse for the wrong
+adjacent-language patterns.
+
+Also a practical issue: qwen3's `<think>` tokens compete with output
+tokens under our shared `max_tokens=4096` config. On harder T2/T3
+problems, `<think>` eats the budget and the kernel gets truncated
+(no_code failures). Fair-test issue: reasoning models arguably need
+a bigger budget to compete on the same terms.
+
+### The T1→T2 cliff is universal, not model-specific
+
+Across all four non-reasoning models tested, T1 sat between 92% and
+100% and T2 dropped to somewhere between 6% and 22%. The cliff isn't
+about model quality — it's about the *domain*: T1 is a one-line
+translation of `f(x[i])`; T2 requires MSL-specific idioms. The
+KernelBench thesis ("LLMs handle elementwise, break on cross-thread
+coordination") reproduces cleanly on Metal.
+
+### make_leaderboard fix
+
+The partial-sample flag was comparing to max_n across runs, which
+missed the case where two runs share the same n but tested different
+subsets. After Phase 2's suite expansion from 36 to 60 problems,
+llama-3.3-70b (36 old problems) and qwen3-32b (first 36 of the new
+60) both looked like "full" rows despite testing overlapping-but-not-
+identical sets of 27 shared + 9 different. Fixed by comparing to
+total problem count from `problems/` discovery instead. Every non-60
+row now correctly flagged.
+
+### Decisions made
+
+- Kept qwen3-32b's partial n=36 in the leaderboard rather than
+  discarding. The 8.3% correct is a real finding, and the partial-
+  sample flag now transparently marks it as not-complete.
+- Left demo/ untouched (external HTML export from earlier, ownership
+  unclear).
+
+### Roadmap status at true session end
+
+    [x] Phase 0
+    [x] Phase 1
+    [x] Phase 2  (60 problems)
+    [~] Phase 3  (4 providers x one_shot, mostly complete;
+                  repair@5 partial for 2 providers, quota-locked)
+    [x] Phase 4  (REPORT.md drafted, updated with cross-model findings)
+    [ ] Phase 5  future work
+    [ ] Phase 6  future work, separate repo
+
+### Open items
+
+- **Complete qwen3-32b sweep** (24 remaining problems) — needs Groq
+  daily bucket to refresh. Would flip the row from partial to full.
+- **Ollama sweep** on the 60-problem suite — the last remaining
+  provider option not blocked by anything except thermal budget.
+  Would give a genuinely-local reference row alongside the cloud
+  providers.
+- **Increase max_tokens for reasoning models** if we test more of
+  them. 4096 is too tight for `<think>` + kernel; 8192 or 16384
+  would be a fairer comparison. But changing prompt config is a
+  benchmark-design decision, not something to silently vary.
+
+---
+
 ## 2026-07-03 (night) — Phase 2 to 60 + Phase 4 report drafted
 
 Big final push. Went from 36 → 60 problems (T1×15, T2×15, T3×15,

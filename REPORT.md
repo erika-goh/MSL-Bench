@@ -32,43 +32,69 @@ that are (correct) AND (kernel_ms ≤ reference_ms / p). So `fast_0` is
 "just correct," `fast_1` is "matches MPS speed or better," `fast_2` is
 "twice MPS speed."
 
-## 2. The two models tested
+## 2. Four models tested
 
-Two providers, one shot each, both free tier:
+Four providers, one shot each, all free tier:
 
-- **Groq** — `llama-3.3-70b-versatile` — full 36-problem one_shot sweep.
-- **Google** — `gemini-2.5-flash` — 19 of 36 before the free tier quota killed the sweep.
+- **Groq / llama-3.3-70b-versatile** — 36-problem one_shot sweep (before the suite expanded to 60).
+- **Groq / llama-3.1-8b-instant** — **first full n=60 sweep**.
+- **Groq / qwen/qwen3-32b** — reasoning model, 36/60 before paused for thermal cool-down.
+- **Google / gemini-2.5-flash** — 19/36 before free tier quota killed the sweep.
 
-(Repair@5 partial data also collected for both; see §5.)
+(Repair@5 partial data also collected for the first two; see §5.)
 
-Headline `fast_0` leaderboard, sorted by sample size (full-suite runs
-first, partial samples tagged):
+Headline `fast_0` leaderboard, sorted by sample size:
 
-    groq llama-3.3-70b one_shot      n=36     38.9%
-    gemini 2.5-flash   one_shot      n=19†    63.2%
-    ollama qwen2.5-coder-14b one_shot n=6†     0.0%
+    groq llama-3.1-8b-instant  one_shot   n=60     28.3%    <- first full run
+    groq llama-3.3-70b         one_shot   n=36†    38.9%
+    groq qwen3-32b (reasoning) one_shot   n=36†    8.3%
+    gemini 2.5-flash           one_shot   n=19†    63.2%
+    ollama qwen2.5-coder-14b   one_shot   n=6†     0.0%
 
-† partial samples — not directly comparable to full-suite rows.
+† partial samples — not directly comparable, and different runs may
+have tested different problem subsets.
 
 ## 3. The T1 → T2 cliff (headline finding)
 
-Under one_shot, both models handle elementwise operations well and cliff-
-dive at reductions:
+All non-reasoning models handle elementwise operations well and
+cliff-dive at reductions:
 
-| Tier | Groq fast_0 | Gemini fast_0 |
-|------|-------------|---------------|
-| T1 elementwise | **100.0%** (12/12) | 91.7% (11/12) |
-| T2 reductions  | 22.2% (2/9)  | 14.3% (1/7)  |
-| T3 tiled       | 0.0%         | *n/a (quota)* |
-| T4 fused       | 0.0%         | *n/a (quota)* |
+| Tier | llama-3.1-8b | llama-3.3-70b | gemini 2.5-flash | qwen3-32b (reasoning) |
+|------|--------------|---------------|-------------------|-----------------------|
+| T1 elementwise | **100.0%** (15/15) | **100.0%** (12/12) | 91.7% (11/12) | 20.0% (3/15) |
+| T2 reductions  | 6.7% (1/15) | 22.2% (2/9) | 14.3% (1/7) | 0.0% (0/15) |
+| T3 tiled       | 0.0% (0/15) | 0.0% (0/8) | n/a | 0.0% (0/6) |
+| T4 fused       | 6.7% (1/15) | 0.0% (0/7) | n/a | n/a |
 
-The two models fail T2 in **complementary** ways:
+Two findings pop out of this cross-model view:
 
-- **Gemini** reaches for the "right" pattern (threadgroup memory, atomics)
-  but writes MSL syntax wrong at the *declaration* level — most T2
-  failures are compile errors.
-- **Groq** writes safer code that compiles and produces correct output,
-  but at speeds well below MPS.
+**Metal elementwise fits in an 8B model.** Both 8B and 70B llama variants
+hit 100% on T1. Whatever the model needs to know about MSL to write
+`out[i] = f(x[i])` correctly is compact enough that the small model has
+it too. Bigger models retain an edge at T2+ (llama-3.3-70b's 22.2%
+vs llama-3.1-8b's 6.7%), which is where MSL-specific patterns —
+threadgroup memory, barriers, atomics — start to matter.
+
+**Reasoning-optimized may be actively harmful on niche syntax.** qwen3-32b
+is the ONLY model in the set that fails T1. Its dominant failure mode
+is using `thread_position_in_grid` as a free variable (OpenCL/CUDA
+style) instead of a Metal parameter attribute. Reading its `<think>`
+blocks: it derives thread-index handling from adjacent-language
+knowledge and applies the wrong pattern confidently. Non-reasoning
+models that pattern-match Metal directly (from training data) get the
+attribute syntax right without "reasoning" about it. Reasoning helps
+when the domain is familiar; on niche territory, it can systematically
+mislead.
+
+Failure taxonomy on T2 splits the non-reasoning models cleanly:
+
+- **Gemini** reaches for the "right" pattern (threadgroup memory,
+  atomics) but writes MSL syntax wrong at the *declaration* level —
+  most T2 failures are compile errors.
+- **Groq llama-3.3-70b** writes safer code that compiles and produces
+  correct output, but at speeds well below MPS.
+- **Groq llama-3.1-8b** mostly compile-fails at T2 like Gemini, plus
+  some verify-fails where the reduction produces wrong numbers.
 
 Both patterns are diagnostic of what LLMs know and don't know about
 Apple's compute programming model. The rest of this report unpacks
