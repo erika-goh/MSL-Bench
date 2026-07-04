@@ -34,8 +34,12 @@ def main() -> None:
         print("no results in results/raw/ yet")
         return
 
-    max_n = max(len(recs) for recs in runs.values())
-    has_partial = any(len(recs) < max_n for recs in runs.values())
+    # Total problems in the suite = ground truth for what "full sample" means.
+    # Comparing to max(len) is misleading when two runs share the same n but
+    # tested different subsets of the suite.
+    from mkb import problems as P
+    total_problems = len(list(P.discover()))
+    has_partial = any(len(recs) < total_problems for recs in runs.values())
 
     lines = ["# Metal KernelBench — Leaderboard", "",
              "| Run | n | fast_0 (correct) | fast_1 (≥MPS) | fast_2 (≥2×MPS) |",
@@ -44,14 +48,15 @@ def main() -> None:
     # for stability across sessions. Partial-sample rows get a † so readers
     # know a headline comparison against a full-suite row isn't apples-to-apples.
     for run, recs in sorted(runs.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        n_str = f"{len(recs)}†" if len(recs) < max_n else str(len(recs))
+        n_str = f"{len(recs)}†" if len(recs) < total_problems else str(len(recs))
         lines.append(f"| {run} | {n_str} | {fast_p(recs, 0):.1%} "
                      f"| {fast_p(recs, 1):.1%} | {fast_p(recs, 2):.1%} |")
     if has_partial:
         lines.append("")
-        lines.append(f"† partial sample (n < {max_n}). Aggregate percentages "
-                     "are not directly comparable to full-suite rows — the "
-                     "subset is typically biased toward earlier/easier tiers.")
+        lines.append(f"† partial sample (n < {total_problems} total problems). "
+                     "Aggregate percentages are not directly comparable across "
+                     "rows — different runs may have tested different subsets "
+                     "of the suite.")
 
     lines += ["", "## Per-tier breakdown", ""]
     for run, recs in sorted(runs.items()):
