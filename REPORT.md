@@ -45,10 +45,10 @@ Four providers, one shot each, all free tier:
 
 Headline `fast_0` leaderboard, sorted by sample size:
 
-    groq llama-3.1-8b-instant  one_shot   n=60     28.3%    <- first full run
-    groq llama-3.3-70b         one_shot   n=36†    38.9%
-    groq qwen3-32b (reasoning) one_shot   n=36†    8.3%
-    gemini 2.5-flash           one_shot   n=19†    63.2%
+    groq llama-3.1-8b-instant  one_shot   n=60     28.3%    <- full
+    groq qwen3-32b (reasoning) one_shot   n=60     8.3%     <- full
+    groq llama-3.3-70b         one_shot   n=43†    44.2%
+    gemini 2.5-flash           one_shot   n=22†    63.6%
     ollama qwen2.5-coder-14b   one_shot   n=6†     0.0%
 
 † partial samples — not directly comparable, and different runs may
@@ -59,12 +59,12 @@ have tested different problem subsets.
 All non-reasoning models handle elementwise operations well and
 cliff-dive at reductions:
 
-| Tier | llama-3.1-8b | llama-3.3-70b | gemini 2.5-flash | qwen3-32b (reasoning) |
+| Tier | llama-3.1-8b (n=60) | llama-3.3-70b (n=43†) | gemini 2.5-flash (n=22†) | qwen3-32b (n=60, reasoning) |
 |------|--------------|---------------|-------------------|-----------------------|
-| T1 elementwise | **100.0%** (15/15) | **100.0%** (12/12) | 91.7% (11/12) | 20.0% (3/15) |
-| T2 reductions  | 6.7% (1/15) | 22.2% (2/9) | 14.3% (1/7) | 0.0% (0/15) |
-| T3 tiled       | 0.0% (0/15) | 0.0% (0/8) | n/a | 0.0% (0/6) |
-| T4 fused       | 6.7% (1/15) | 0.0% (0/7) | n/a | n/a |
+| T1 elementwise | **100.0%** (15/15) | **100.0%** (15/15) | 86.7% (13/15) | 20.0% (3/15) |
+| T2 reductions  | 6.7% (1/15) | 30.8% (4/13) | 14.3% (1/7) | 0.0% (0/15) |
+| T3 tiled       | 0.0% (0/15) | 0.0% (0/8) | n/a | **6.7%** (1/15) |
+| T4 fused       | 6.7% (1/15) | 0.0% (0/7) | n/a | **6.7%** (1/15) |
 
 Two findings pop out of this cross-model view:
 
@@ -75,16 +75,25 @@ it too. Bigger models retain an edge at T2+ (llama-3.3-70b's 22.2%
 vs llama-3.1-8b's 6.7%), which is where MSL-specific patterns —
 threadgroup memory, barriers, atomics — start to matter.
 
-**Reasoning-optimized may be actively harmful on niche syntax.** qwen3-32b
-is the ONLY model in the set that fails T1. Its dominant failure mode
-is using `thread_position_in_grid` as a free variable (OpenCL/CUDA
-style) instead of a Metal parameter attribute. Reading its `<think>`
-blocks: it derives thread-index handling from adjacent-language
-knowledge and applies the wrong pattern confidently. Non-reasoning
-models that pattern-match Metal directly (from training data) get the
-attribute syntax right without "reasoning" about it. Reasoning helps
-when the domain is familiar; on niche territory, it can systematically
-mislead.
+**Reasoning-optimized has an inverted tier profile.** qwen3-32b
+is the ONLY model in the set that fails T1 (3/15 = 20%). Its
+dominant T1 failure mode is using `thread_position_in_grid` as a
+free variable (OpenCL/CUDA style) instead of a Metal parameter
+attribute. Reading its `<think>` blocks: it derives thread-index
+handling from adjacent-language knowledge and applies the wrong
+pattern confidently. Non-reasoning models that pattern-match Metal
+directly (from training data) get the attribute syntax right
+without "reasoning" about it.
+
+But: qwen3-32b is also the ONLY model that got any T3 correct
+(1/15). llama-3.1-8b and llama-3.3-70b are both 0/15 and 0/8 on
+T3. And qwen3 ties llama-3.1-8b on T4 (1/15 each). So reasoning
+appears to be **worst-worse on T1 and best-better on T3/T4**,
+even while being dramatically worse overall. Small sample sizes
+in the "wins" (n=1 each) mean this could be noise, but the
+direction is worth noting: reasoning helps where the algorithmic
+structure matters (tiled matmul, attention) and hurts where the
+answer is a syntax pattern (elementwise, threadgroup tree reduce).
 
 Failure taxonomy on T2 splits the non-reasoning models cleanly:
 
