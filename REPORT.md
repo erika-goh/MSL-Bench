@@ -45,6 +45,7 @@ Four providers, one shot each, all free tier:
 
 Headline `fast_0` leaderboard, sorted by sample size:
 
+    groq openai/gpt-oss-120b   one_shot   n=60     45.0%    <- full, leader
     groq llama-3.1-8b-instant  one_shot   n=60     28.3%    <- full
     groq qwen3-32b (reasoning) one_shot   n=60     8.3%     <- full
     groq llama-3.3-70b         one_shot   n=43†    44.2%
@@ -59,21 +60,39 @@ have tested different problem subsets.
 All non-reasoning models handle elementwise operations well and
 cliff-dive at reductions:
 
-| Tier | llama-3.1-8b (n=60) | llama-3.3-70b (n=43†) | gemini 2.5-flash (n=22†) | qwen3-32b (n=60, reasoning) |
-|------|--------------|---------------|-------------------|-----------------------|
-| T1 elementwise | **100.0%** (15/15) | **100.0%** (15/15) | 86.7% (13/15) | 20.0% (3/15) |
-| T2 reductions  | 6.7% (1/15) | 30.8% (4/13) | 14.3% (1/7) | 0.0% (0/15) |
-| T3 tiled       | 0.0% (0/15) | 0.0% (0/8) | n/a | **6.7%** (1/15) |
-| T4 fused       | 6.7% (1/15) | 0.0% (0/7) | n/a | **6.7%** (1/15) |
+| Tier | gpt-oss-120b (n=60) | llama-3.3-70b (n=43†) | llama-3.1-8b (n=60) | gemini 2.5-flash (n=22†) | qwen3-32b (n=60, reasoning) |
+|------|--------------|---------------|--------------|-------------------|-----------------------|
+| T1 elementwise | 93.3% (14/15) | **100.0%** (15/15) | **100.0%** (15/15) | 86.7% (13/15) | 20.0% (3/15) |
+| T2 reductions  | **46.7%** (7/15) | 30.8% (4/13) | 6.7% (1/15) | 14.3% (1/7) | 0.0% (0/15) |
+| T3 tiled       | **20.0%** (3/15) | 0.0% (0/8) | 0.0% (0/15) | n/a | 6.7% (1/15) |
+| T4 fused       | **20.0%** (3/15) | 0.0% (0/7) | 6.7% (1/15) | n/a | 6.7% (1/15) |
 
-Two findings pop out of this cross-model view:
+Three findings pop out of this cross-model view:
 
 **Metal elementwise fits in an 8B model.** Both 8B and 70B llama variants
 hit 100% on T1. Whatever the model needs to know about MSL to write
 `out[i] = f(x[i])` correctly is compact enough that the small model has
-it too. Bigger models retain an edge at T2+ (llama-3.3-70b's 22.2%
-vs llama-3.1-8b's 6.7%), which is where MSL-specific patterns —
+it too. Bigger models retain an edge at T2+ (llama-3.3-70b's 30.8% vs
+llama-3.1-8b's 6.7%), which is where MSL-specific patterns —
 threadgroup memory, barriers, atomics — start to matter.
+
+**gpt-oss-120b is qualitatively ahead on hard tiers.** It's the only
+model in the set that gets meaningful T3 (3/15 = 20%) and T4 (3/15 =
+20%) numbers. Every other model tested is ≤ 1/15 on those tiers.
+It's also the only model with a meaningful fast_2 rate (10.0% —
+6× the next best). Whatever OpenAI's open-source lineage carries into
+gpt-oss-120b, it's transferring to Metal in a way the Meta and
+Alibaba lineages aren't. Notable: it costs one T1 problem (14/15 =
+93.3%, not 100%), so it's slightly imperfect on the easiest tier
+even while dominating the hardest ones — different quality profile
+from the llama family, not strictly-better.
+
+The T1→T2 cliff still exists for gpt-oss-120b (93% → 47%, a 46-point
+drop) but is *shallower* than for the smaller models (llama-3.1-8b:
+100% → 7%, a 93-point drop). So the cliff is a universal cross-
+provider phenomenon (Meta, Alibaba, OpenAI, Google all show it) but
+its height correlates with model quality — better models fall less
+far.
 
 **Reasoning-optimized has an inverted tier profile.** qwen3-32b
 is the ONLY model in the set that fails T1 (3/15 = 20%). Its
