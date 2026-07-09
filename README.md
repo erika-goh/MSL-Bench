@@ -55,7 +55,7 @@ export GEMINI_API_KEY=...
 python scripts/run_suite.py --provider gemini --model gemini-2.0-flash --mode repair --k 5
 
 python scripts/make_leaderboard.py   # -> results/tables/leaderboard.md
-make demo                             # -> demo/leaderboard.html (single-file, opens in any browser)
+make demo                             # -> demo/index.html (single-file, opens in any browser)
 ```
 
 ## How a candidate kernel is judged

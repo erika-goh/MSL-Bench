@@ -30,7 +30,8 @@ from mkb.score import fast_p
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "results" / "raw"
-DEMO = ROOT / "demo" / "leaderboard.html"
+# demo/index.html is Vercel's default entry point (served at `/`)
+DEMO = ROOT / "demo" / "index.html"
 
 MARKER_START = "// >>>GEN_DATA_START"
 MARKER_END = "// <<<GEN_DATA_END"
