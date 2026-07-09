@@ -1,4 +1,4 @@
-.PHONY: runner test test-mac slice suite-local leaderboard demo clean
+.PHONY: runner test test-mac slice suite-local leaderboard demo thumbnail clean
 
 runner:
 	swift build -c release --package-path runner
@@ -23,6 +23,10 @@ leaderboard:
 # Regenerate the standalone HTML leaderboard demo from results/raw/*.json
 demo:
 	python scripts/make_demo.py
+
+# Regenerate portfolio thumbnail (SVG + PNG) from results/raw/*.json
+thumbnail:
+	python scripts/make_thumbnail.py
 
 clean:
 	rm -rf runner/.build results/raw/*.json
