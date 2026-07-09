@@ -1,4 +1,4 @@
-.PHONY: runner test test-mac slice suite-local leaderboard clean
+.PHONY: runner test test-mac slice suite-local leaderboard demo clean
 
 runner:
 	swift build -c release --package-path runner
@@ -19,6 +19,10 @@ suite-local:
 
 leaderboard:
 	python scripts/make_leaderboard.py
+
+# Regenerate the standalone HTML leaderboard demo from results/raw/*.json
+demo:
+	python scripts/make_demo.py
 
 clean:
 	rm -rf runner/.build results/raw/*.json
