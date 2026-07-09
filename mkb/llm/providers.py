@@ -45,19 +45,24 @@ def _post_json(url: str, payload: dict, headers: dict, retries: int = 3) -> dict
     raise RuntimeError("unreachable")
 
 
-def groq(messages: list[dict], model: str = "llama-3.3-70b-versatile") -> str:
+DEFAULT_MAX_TOKENS = 4096
+
+
+def groq(messages: list[dict], model: str = "llama-3.3-70b-versatile",
+         max_tokens: int = DEFAULT_MAX_TOKENS) -> str:
     key = os.environ.get("GROQ_API_KEY")
     if not key:
         raise RuntimeError("GROQ_API_KEY not set")
     res = _post_json(
         "https://api.groq.com/openai/v1/chat/completions",
-        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 4096},
+        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens},
         {"Authorization": f"Bearer {key}"},
     )
     return res["choices"][0]["message"]["content"]
 
 
-def gemini(messages: list[dict], model: str = "gemini-2.0-flash") -> str:
+def gemini(messages: list[dict], model: str = "gemini-2.0-flash",
+           max_tokens: int = DEFAULT_MAX_TOKENS) -> str:
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("GEMINI_API_KEY not set")
@@ -68,7 +73,7 @@ def gemini(messages: list[dict], model: str = "gemini-2.0-flash") -> str:
     ]
     system = next((m["content"] for m in messages if m["role"] == "system"), None)
     payload: dict = {"contents": contents,
-                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096}}
+                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}}
     if system:
         payload["systemInstruction"] = {"parts": [{"text": system}]}
     res = _post_json(
@@ -78,12 +83,13 @@ def gemini(messages: list[dict], model: str = "gemini-2.0-flash") -> str:
     return res["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def ollama(messages: list[dict], model: str = "qwen2.5-coder:14b") -> str:
+def ollama(messages: list[dict], model: str = "qwen2.5-coder:14b",
+           max_tokens: int = DEFAULT_MAX_TOKENS) -> str:
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     res = _post_json(
         f"{host}/api/chat",
         {"model": model, "messages": messages, "stream": False,
-         "options": {"temperature": 0.2, "num_predict": 4096}},
+         "options": {"temperature": 0.2, "num_predict": max_tokens}},
         {},
     )
     return res["message"]["content"]
@@ -92,6 +98,10 @@ def ollama(messages: list[dict], model: str = "qwen2.5-coder:14b") -> str:
 PROVIDERS = {"groq": groq, "gemini": gemini, "ollama": ollama}
 
 
-def complete(provider: str, messages: list[dict], model: str | None = None) -> str:
+def complete(provider: str, messages: list[dict], model: str | None = None,
+             max_tokens: int = DEFAULT_MAX_TOKENS) -> str:
     fn = PROVIDERS[provider]
-    return fn(messages, model) if model else fn(messages)
+    kwargs = {"max_tokens": max_tokens}
+    if model:
+        return fn(messages, model, **kwargs)
+    return fn(messages, **kwargs)

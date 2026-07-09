@@ -8,4 +8,5 @@ results/calibration.json
 .venv/
 *_run.log
 *_backfill.log
+results/logs/
 /tmp/

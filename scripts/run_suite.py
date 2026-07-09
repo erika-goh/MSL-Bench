@@ -76,11 +76,17 @@ def main() -> None:
                     help="comma-separated problem ids to include (e.g. p001_vector_add,p013_gelu)")
     ap.add_argument("--sleep", type=float, default=2.0,
                     help="seconds between problems (be gentle with free tiers)")
+    ap.add_argument("--max-tokens", type=int, default=4096,
+                    help="max output tokens per generation (reasoning models need more)")
     args = ap.parse_args()
     only = set(x.strip() for x in args.only.split(",")) if args.only else None
 
     RESULTS_RAW.mkdir(parents=True, exist_ok=True)
     run_tag = f"{args.provider}_{(args.model or 'default').replace('/', '-').replace(':', '-')}_{args.mode}"
+    # Non-default max_tokens becomes part of the tag so re-sweeps don't overwrite
+    # earlier records and both budgets end up as separate leaderboard rows.
+    if args.max_tokens != 4096:
+        run_tag += f"_mt{args.max_tokens}"
 
     records = []
     for spec_path in P.discover():
@@ -94,7 +100,7 @@ def main() -> None:
 
         try:
             if args.mode == "one_shot":
-                gen = one_shot(args.provider, problem, args.model)
+                gen = one_shot(args.provider, problem, args.model, max_tokens=args.max_tokens)
                 if gen["kernel"] is None:
                     rec = {"success": False, "metrics": {"stage": "no_code"}, "attempts": 1}
                 else:
@@ -106,7 +112,8 @@ def main() -> None:
                     ok, fb, metrics = evaluate_kernel(src, problem, reference)
                     feedback_fn.last_metrics = metrics  # type: ignore[attr-defined]
                     return ok, fb
-                gen = repair_k(args.provider, problem, feedback_fn, k=args.k, model=args.model)
+                gen = repair_k(args.provider, problem, feedback_fn, k=args.k, model=args.model,
+                               max_tokens=args.max_tokens)
                 rec = {"success": gen["success"],
                        "metrics": getattr(feedback_fn, "last_metrics", {}),
                        "attempts": gen["attempts"]}

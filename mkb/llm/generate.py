@@ -85,14 +85,16 @@ def extract_metal(text: str) -> str | None:
     return None
 
 
-def one_shot(provider: str, problem: dict, model: str | None = None) -> dict:
+def one_shot(provider: str, problem: dict, model: str | None = None,
+             max_tokens: int = providers.DEFAULT_MAX_TOKENS) -> dict:
     messages = build_prompt(problem)
-    raw = providers.complete(provider, messages, model)
+    raw = providers.complete(provider, messages, model, max_tokens=max_tokens)
     return {"mode": "one_shot", "attempts": 1,
             "kernel": extract_metal(raw), "transcript": messages + [{"role": "assistant", "content": raw}]}
 
 
-def repair_k(provider: str, problem: dict, feedback_fn, k: int = 5, model: str | None = None) -> dict:
+def repair_k(provider: str, problem: dict, feedback_fn, k: int = 5, model: str | None = None,
+             max_tokens: int = providers.DEFAULT_MAX_TOKENS) -> dict:
     """Iterative repair loop.
 
     feedback_fn(kernel_src: str) -> (success: bool, feedback: str)
@@ -103,7 +105,7 @@ def repair_k(provider: str, problem: dict, feedback_fn, k: int = 5, model: str |
     messages = build_prompt(problem)
     kernel = None
     for attempt in range(1, k + 1):
-        raw = providers.complete(provider, messages, model)
+        raw = providers.complete(provider, messages, model, max_tokens=max_tokens)
         messages.append({"role": "assistant", "content": raw})
         kernel = extract_metal(raw)
         if kernel is None:
