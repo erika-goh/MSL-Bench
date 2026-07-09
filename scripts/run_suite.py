@@ -98,6 +98,7 @@ def main() -> None:
             continue
         print(f"[{run_tag}] {pid} ...", flush=True)
 
+        gen = None  # so the except block can preserve the LLM output if we got that far
         try:
             if args.mode == "one_shot":
                 gen = one_shot(args.provider, problem, args.model, max_tokens=args.max_tokens)
@@ -121,12 +122,16 @@ def main() -> None:
         except Exception as e:
             # A single provider / evaluator error should not terminate the whole
             # suite — record it as this problem's failure and continue.
+            # If the LLM call already returned (`gen` is set), the exception
+            # happened downstream (compile / verify / timing) and the transcript
+            # we paid for is worth preserving as Phase-6 flywheel seed data.
             err = f"{type(e).__name__}: {str(e)[:500]}"
             print(f"    !! {err}", flush=True)
             rec = {"success": False,
                    "metrics": {"stage": "provider_error", "error": err},
                    "attempts": 1}
-            transcript = [{"role": "error", "content": err}]
+            err_msg = {"role": "error", "content": err}
+            transcript = gen["transcript"] + [err_msg] if gen else [err_msg]
 
         record = {
             "run": run_tag, "problem": pid, "tier": problem["tier"],
