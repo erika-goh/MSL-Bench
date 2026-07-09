@@ -114,6 +114,49 @@ direction is worth noting: reasoning helps where the algorithmic
 structure matters (tiled matmul, attention) and hurts where the
 answer is a syntax pattern (elementwise, threadgroup tree reduce).
 
+**Fair-budget experiment: bigger budget makes qwen3 worse.** The
+obvious rebuttal to the qwen3 numbers is that `<think>` shares
+`max_tokens=4096` with the emitted kernel, so on harder problems
+the kernel gets truncated (recorded as `no_code`). To test this,
+qwen3 was re-run at `max_tokens=5200` — the ceiling under Groq
+free tier's 6000-tokens-per-minute cap for this model — with 65-
+second between-request pacing. n=60 again.
+
+Result: **0 confirmed correct at mt=5200 vs 5/60 at mt=4096.** Even
+in the maximally generous salvage (5 records lost their transcript
+to a harness bug; if every lost record were correct), mt=5200 ties
+baseline at 5/60. Realistic bound: mt=5200 is neutral-to-worse.
+
+The mechanism is visible at kernel level. On `p003_elementwise_mul`
+qwen3 at mt=4096 emitted the correct MSL attribute:
+
+    uint id [[thread_position_in_grid]]   // mt=4096, verifies correct
+
+At mt=5200, given ~1100 extra tokens of `<think>`, the same model
+on the same problem emitted:
+
+    uint id [[thread_index_in_grid]]      // mt=5200, compile-fail
+
+`thread_index_in_grid` is not a real MSL attribute — it's an
+invented one, plausibly derived by reasoning about what the name
+"should" be. The same `position_in_grid → index_in_grid` overwrite
+appears on `p010_abs` (also correct at mt=4096, compile-fail at
+mt=5200). Response length on both problems grows from ~3K to ~7K
+chars, entirely in the `<think>` block.
+
+**More reasoning budget does not fix — it worsens — the exact
+failure mode reasoning-vs-pattern-match already produces.** The
+extra tokens go into more elaborate derivations of the wrong
+adjacent-language pattern, not toward the correct pattern-match
+answer. `<think>` truncation was not the bottleneck for this model
+on this benchmark; the overwrite is the story.
+
+(Testing this at a *materially* bigger budget — e.g. 16384 tokens,
+where the entire reasoning trace fits and doesn't compete with the
+kernel emit — would need a paid tier: Groq's 6000 TPM cap for this
+model blocks it, and every request at 16384 tokens 413's
+immediately.)
+
 Failure taxonomy on T2 splits the non-reasoning models cleanly:
 
 - **Gemini** reaches for the "right" pattern (threadgroup memory,

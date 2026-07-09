@@ -5,6 +5,166 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-09 — the qwen3 fair-budget experiment: bigger `<think>` is actively worse
+
+Ran the fair-budget rebuttal to the "qwen3 is bad because `<think>`
+truncates the kernel" hypothesis from the 07-04 session. Result is
+a clean null-plus: bigger reasoning budget doesn't just fail to
+help qwen3-32b on this benchmark, **it makes it strictly worse**.
+Session also surfaced two harness bugs, one of which cost real data.
+
+### What got built
+
+    scripts/run_suite.py         --max-tokens flag + _mt{N} run-tag
+    mkb/llm/generate.py          plumb max_tokens through one_shot / repair_k
+    mkb/llm/providers.py         plumb max_tokens through groq/gemini/ollama
+    scripts/reverify.py          new — post-hoc re-verify skipped records
+    .gitignore                   ignore results/logs/ (sweep logs)
+
+The `--max-tokens` flag exists so reasoning-model budgets can be
+varied without silently mutating a shared default. `_mt{N}` in the
+run tag prevents non-default budgets from overwriting baseline
+records — every budget becomes its own leaderboard row.
+
+`scripts/reverify.py` exists because of a harness bug (below).
+
+### The token math and why 5200 was the honest ceiling
+
+Groq free tier caps qwen3-32b at 6000 tokens/minute (TPM). A single
+request "reserves" `prompt_tokens + max_tokens` against that budget.
+Measured actual prompt sizes across 60 problems: 340–600 tokens.
+Under the worst-case 600-token prompt, `max_tokens ≤ 5400`. Chose
+**5200** for a 200-token safety margin, plus **--sleep 65** to
+respect the rolling minute (retry backoff is 15+30+45 = 90s, enough
+to unstick occasional bunching).
+
+A first attempt at 16384 (session notes 2026-07-04 open items) 413'd
+every request — the max_tokens value alone exceeded the TPM cap.
+
+### Result: 0/60 vs baseline 5/60 (or 5/60 tie at max salvage)
+
+    baseline mt=4096:  5/60 correct  (T1:3, T2:0, T3:1, T4:1)
+    experiment mt=5200: 0/60 confirmed correct
+                       (T1:0, T2:0, T3:0, T4:0)
+                       + 5 records with LLM output lost to harness bug
+                       → max salvage = 5/60 (tie), realistic = worse
+
+Which specific problems went from correct → wrong at bigger budget:
+
+    p003_elementwise_mul  mt=4096 correct  →  mt=5200 compile-fail
+    p010_abs              mt=4096 correct  →  mt=5200 compile-fail
+    p314_swiglu           mt=4096 correct  →  mt=5200 compile-fail
+    p008_tanh             mt=4096 correct  →  mt=5200 lost transcript
+    p209_matmul_naive     mt=4096 correct  →  mt=5200 lost transcript
+
+### The mechanism, at kernel level
+
+For p003_elementwise_mul (a one-line elementwise mul), the two
+kernels differ by exactly one token:
+
+    mt=4096 (correct):
+        uint id [[thread_position_in_grid]]
+
+    mt=5200 (compile-fail):
+        uint id [[thread_index_in_grid]]
+
+`thread_index_in_grid` is NOT a real MSL attribute — it's invented.
+qwen3, given ~1100 more tokens of `<think>`, reasoned about what the
+attribute "should" be called and got it wrong. The same
+`position_in_grid → index_in_grid` overwrite happened on p010_abs.
+On both problems the response length grew from ~3K → ~7K chars,
+entirely in the `<think>` block.
+
+This is the "reasoning overwrites pattern-match" thesis from the
+07-04 session (qwen3 vs non-reasoning llamas), now demonstrated at
+*problem-level granularity within the same model*. Give qwen3 more
+budget, watch it derive itself off a correct answer.
+
+**The generalization: giving a reasoning model more thinking budget
+does not help on domains where the correct answer is a memorized
+pattern-match** — because the extra budget doesn't buy access to
+the right pattern; it buys more elaborate wrong pattern-derivations
+from adjacent languages the model does know.
+
+Contrast with the story reasoning helps in: T3/T4 problems where
+the algorithm structure matters (tiled matmul, attention). qwen3
+baseline was 1/15 T3 and 1/15 T4 — the ONLY model in the roster
+that got any T3 correct. That's plausibly reasoning helping. But
+the T1 syntactic-pattern regime shows reasoning hurting cleanly.
+
+### Two harness bugs surfaced
+
+**Bug 1: launched with system python, not `.venv/bin/python`.**
+Torch is installed in `.venv` but I ran `python3 scripts/run_suite.py`.
+Torch is only imported inside `evaluate_kernel`'s verify step. Any
+kernel that compiled + ran successfully then hit `ModuleNotFoundError`
+at import torch, was caught by the outer exception handler, and
+recorded as `provider_error`. Meaning: the "kernel is correct"
+signal was silently converted to "provider error" for every
+kernel that made it past compile+run.
+
+Salvageable via re-verify from saved transcripts — except for bug 2.
+
+**Bug 2: run_suite.py's exception handler is destructive.** In
+`scripts/run_suite.py`:
+
+    except Exception as e:
+        ...
+        transcript = [{"role": "error", "content": err}]
+
+When evaluate_kernel raises (torch import, GPU OOM, anything
+downstream of the LLM call), the transcript is REPLACED with just
+the error text. **The actual LLM output — which we already paid
+Groq to generate — is lost.**
+
+For this sweep, that meant 5 records permanently lost their kernel
+source: p004, p008, p207, p209, p315. Two of those (p008, p209) had
+been correct at baseline; likely correct at mt=5200 too. We can't
+verify them because the LLM output is gone.
+
+The fix is trivial (preserve `gen['transcript']` if the LLM call
+succeeded before the exception). But it's a data-integrity bug that
+matters most for Phase 6, where these transcripts ARE the flywheel
+seed data. Losing them silently is not OK.
+
+### Decisions made
+
+- Kept the compile-fail and no_code records from mt=5200 — they're
+  trustworthy (no torch involvement) and constitute the main finding.
+- Did NOT re-run the sweep to recover the 5 lost records. The maximum
+  possible salvage (5/60 = 8.3%, matching baseline) doesn't change
+  the "not worse than baseline, likely worse" conclusion. Spending
+  another 70 minutes of Groq TPM on this would improve confidence in
+  the margin, not the direction.
+- REPORT.md's "Fair-budget caveat" paragraph was rewritten to become
+  a full sub-finding ("bigger budget makes qwen3 worse") rather than
+  a "we couldn't test this" caveat.
+- Log file `results/logs/qwen3_mt16384.log` (the 413'd first attempt)
+  is now gitignored via `results/logs/` — the mt5200 sweep's log
+  is the useful artifact and is also gitignored.
+
+### Open items (carry into next session)
+
+- **Fix run_suite.py's transcript-loss bug.** Trivial change,
+  should land before any future sweep. Preserve `gen['transcript']`
+  when the LLM call succeeded and the exception was downstream.
+- **Add a preflight check that torch is importable** in run_suite.py
+  before starting the loop — would have failed fast on the venv
+  mistake instead of silently ruining 5 records.
+- **Update the leaderboard** with the mt=5200 row. It should sit
+  next to the mt=4096 baseline as a genuinely new data point, not
+  a re-run of the same experiment.
+- **Groq free tier's 6000 TPM cap on qwen3-32b** blocks the
+  materially-bigger-budget test (e.g. 16384). That test would need
+  a paid tier or a different provider. Not blocking any current
+  claim — the mt=5200 direction is clear enough — but a paid-tier
+  qwen3 run would tighten the "bigger budget always hurts?" claim
+  from "at 5200" to "at any budget large enough to actually think."
+- **Phase 5 (web demo)** and **Phase 6 (data flywheel)** still the
+  natural next-work. mt=5200 didn't change those priorities.
+
+---
+
 ## 2026-07-04 (dawn) — two more Groq models, cross-model comparison sharpens the story
 
 Ran two more providers on Groq's fresh per-model quota buckets after
