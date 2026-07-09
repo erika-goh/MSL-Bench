@@ -558,7 +558,7 @@
 
   <div class="page-head">
     <div class="section-label">01 .kernelbench()</div>
-    <h1 class="page-title">LLM-generated <span class="accent">Metal</span> kernels, timed on GPU.</h1>
+    <h1 class="page-title">Evaluating LLM-Generated <span class="accent">Metal</span> Compute Kernels on Apple Silicon</h1>
     <div class="prose" style="margin-top: 1.25rem">
       <p><strong>Can a language model write GPU code that actually runs — and beats the hand-tuned libraries GPUs ship with?</strong> Every kernel below is a real <code>.metal</code> file, compiled with Apple's own <code>xcrun metal</code>, executed on Apple Silicon, verified against <a href="https://developer.apple.com/documentation/metalperformanceshaders" title="Metal Performance Shaders — Apple's optimized GPU compute library" style="color:var(--text);border-bottom:1px solid var(--accent-soft)">Metal Performance Shaders</a> (MPS, Apple's own GPU compute library), and timed with GPU timestamps. Nothing simulated.</p>
       <p>The headline metric is <code>fast_p</code>: the fraction of problems where the model's kernel was both <em>correct</em> AND ran at least <em>p</em>× as fast as MPS. So <code>fast_1 = 40%</code> means the model got 40% of problems right with kernels that matched or beat Apple's implementation.</p>
