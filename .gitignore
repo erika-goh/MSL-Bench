@@ -10,3 +10,4 @@ results/calibration.json
 *_backfill.log
 results/logs/
 /tmp/
+.vercel/
