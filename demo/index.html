@@ -626,13 +626,15 @@
     <div class="prose">
       <p>Three angles on the same data. The <strong>fast_p curve</strong> is the money chart — it shows cumulative correctness across every speedup threshold. A curve staying high past the <code>= MPS</code> dashed line means the model isn't just writing correct kernels; it's writing ones that <strong>match or beat Apple's own implementation</strong>.</p>
       <p>The <strong>tier bars</strong> break correctness down by difficulty. <code>T1</code> is elementwise math like <code>out[i] = f(x[i])</code>. <code>T2</code> is reductions (row sums, softmax) — the first tier requiring cross-thread coordination via threadgroup memory and barriers. <code>T3</code> is tiled kernels (matmul, convolution). <code>T4</code> is fused ops (attention, layernorm, GLU) — the actual building blocks of modern LLMs. The <strong>T1 → T2 cliff</strong> is universal across every model tested: everyone handles elementwise Metal, everyone cliff-dives on cross-thread coordination.</p>
-      <p><strong>Failure modes</strong> shows where each run breaks. The colored segment on each bar is that run's correct kernels — painted in the model's line color from the charts above. Grays are the ways things went wrong: light gray for verify-fail (compiled + ran but wrong numbers), progressively darker for compile-fail, runtime-fail, provider error, and no code emitted. A short colored bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
     </div>
     <div class="charts">
       <div class="chart">
         <h3>fast_p curves</h3>
         <div class="subtitle">Fraction of problems correct AND reaching ≥ p × the PyTorch MPS reference speed. Higher curve = better model. Dashed line at p=1 = matches MPS.</div>
         <div id="chart-fastp-body"></div>
+      </div>
+      <div class="prose" style="margin-top: 1.5rem">
+        <p><strong>Failure modes</strong> shows where each run breaks. The colored segment on each bar is that run's correct kernels — painted in the model's line color from the charts above. Grays are the ways things went wrong: light gray for verify-fail (compiled + ran but wrong numbers), progressively darker for compile-fail, runtime-fail, provider error, and no code emitted. A short colored bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
       </div>
       <div class="row2">
         <div class="chart">
@@ -642,7 +644,7 @@
         </div>
         <div class="chart">
           <h3>Where each run fails</h3>
-          <div class="subtitle">Attempted problems by outcome. Green = correct; grays = failure modes.</div>
+          <div class="subtitle">Attempted problems by outcome. Colored = correct; grays = failure modes.</div>
           <div id="chart-stage-body"></div>
         </div>
       </div>
