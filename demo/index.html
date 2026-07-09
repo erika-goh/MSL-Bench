@@ -633,8 +633,11 @@
         <div class="subtitle">Fraction of problems correct AND reaching ≥ p × the PyTorch MPS reference speed. Higher curve = better model. Dashed line at p=1 = matches MPS.</div>
         <div id="chart-fastp-body"></div>
       </div>
-      <div class="prose" style="margin-top: 1.5rem">
-        <p><strong>Failure modes</strong> shows where each run breaks. The colored segment on each bar is that run's correct kernels — painted in the model's line color from the charts above. Grays are the ways things went wrong: light gray for verify-fail (compiled + ran but wrong numbers), progressively darker for compile-fail, runtime-fail, provider error, and no code emitted. A short colored bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
+      <div style="margin-top: 2rem">
+        <div class="section-label">.failure_modes()</div>
+        <div class="prose">
+          <p><strong>Failure modes</strong> shows where each run breaks. The colored segment on each bar is that run's correct kernels — painted in the model's line color from the charts above. Grays are the ways things went wrong: light gray for verify-fail (compiled + ran but wrong numbers), progressively darker for compile-fail, runtime-fail, provider error, and no code emitted. A short colored bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
+        </div>
       </div>
       <div class="row2">
         <div class="chart">
