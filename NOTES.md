@@ -5,6 +5,159 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-09 (later) — why tiers exist: MSL-knowledge calibration, not just difficulty
+
+Recording this for the report because "why is the suite tiered" is the
+first question anyone with a benchmark-design instinct asks, and the
+answer is more specific than "harder problems."
+
+### The design claim
+
+**Each tier is calibrated around what MSL-specific patterns the model
+actually needs to know to write a working kernel — not just around
+compute intensity or line count.** T1 problems could be written in
+nearly any C-like language; T2+ problems can only be written correctly
+if the model knows Metal-specific idioms that don't map 1:1 from CUDA.
+
+    T1 elementwise  → one thread per output, no cross-thread coord
+                      example: `out[i] = f(x[i])`
+                      MSL-specific knowledge required: ~none
+                      real-world use: activation functions
+                      (ReLU, sigmoid, tanh, GELU, abs, exp, ...)
+
+    T2 reductions   → first tier requiring `threadgroup` memory +
+                      `threadgroup_barrier`. Many threads collaborate
+                      to compute one output.
+                      example: row_sum, row_max, softmax, prefix scan
+                      MSL-specific knowledge required: threadgroup
+                      address space, barrier memory flags, sometimes
+                      simd_shuffle_down / simd_sum
+                      real-world use: softmax, layer stats, norms
+
+    T3 tiled        → cooperative loading of shared tiles into
+                      threadgroup memory + tile-index math. Multiple
+                      threads read overlapping data.
+                      example: matmul, matmul_simdgroup, conv2d, sgemv,
+                      transpose_tiled
+                      MSL-specific knowledge required: tile staging,
+                      halo pattern, index-flattening math
+                      real-world use: the core of every neural net layer
+
+    T4 fused        → multiple ops in one kernel — reduction +
+                      normalize + activation all in one dispatch.
+                      Hits every level of the memory hierarchy.
+                      example: LayerNorm, RMSNorm, SwiGLU, causal
+                      masked attention, GELU-fused MLP
+                      MSL-specific knowledge required: T2 + T3
+                      combined, plus in-register accumulation,
+                      plus dispatch-overhead awareness
+                      real-world use: the actual building blocks of
+                      modern LLMs
+
+### Why this specific design (vs. just a mixed pile)
+
+If the suite were 60 unranked problems, the aggregate score would give
+you an average — informative but not diagnostic. Tiering makes the
+failure mode legible. It lets the benchmark answer **one question
+cleanly: at what level of Metal complexity do LLMs cliff-dive?**
+
+That question is only answerable because we can separately measure
+correctness at each tier. Without tiers, "the model got 45% correct"
+tells you a number; with tiers, you get "the model handles all
+elementwise but fails 80% of the time on anything cross-thread" —
+which is a mechanism.
+
+### The empirical result the tier design surfaces
+
+Universal across every model tested — llama-3.1-8b, llama-3.3-70b,
+gpt-oss-120b, gemini-2.5-flash, qwen3-32b — same shape:
+
+    T1: 87–100% correct  (some models 100%)
+    T2: 7–47% correct    (best is gpt-oss-120b)
+    T3: 0–20% correct
+    T4: 0–20% correct
+
+The absolute numbers vary; the *cliff* between T1 and T2 does not.
+That's what pins the finding: it's not "LLMs are bad at Metal in
+general." It's specifically that they can't reliably use `threadgroup`
+memory + `threadgroup_barrier` + SIMD-group intrinsics — the MSL-
+specific patterns that don't have 1:1 CUDA equivalents. CUDA's
+`__syncthreads()` has no flag parameter, so models don't know Metal's
+barrier flags are load-bearing. CUDA's `__shared__` maps to Metal's
+`threadgroup` address space but not identically. Etc.
+
+### T1 vs T2 side by side (put this in the report)
+
+T1 vector_add — trivial, no MSL-specific idioms:
+
+    kernel void vector_add(device float *a [[buffer(0)]],
+                           device float *b [[buffer(1)]],
+                           device float *out [[buffer(2)]],
+                           uint id [[thread_position_in_grid]]) {
+        out[id] = a[id] + b[id];
+    }
+
+T2 row_sum — requires understanding Metal's memory model:
+
+    kernel void row_sum(device const float *x [[buffer(0)]],
+                        device float *out [[buffer(1)]],
+                        threadgroup float *scratch [[threadgroup(0)]],
+                        uint lid [[thread_position_in_threadgroup]],
+                        uint row [[threadgroup_position_in_grid]]) {
+        scratch[lid] = x[row * K + lid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);  // ← flag matters
+        for (uint s = K/2; s > 0; s /= 2) {
+            if (lid < s) scratch[lid] += scratch[lid + s];
+            threadgroup_barrier(mem_flags::mem_threadgroup);  // ← models forget this
+        }
+        if (lid == 0) out[row] = scratch[0];
+    }
+
+The delta between those two is where the whole "MSL is not CUDA"
+story lives. Every T2 kernel Groq's llama-3.3-70b wrote had *some*
+version of that structure — but with `mem_device` instead of
+`mem_threadgroup` on the barrier, which costs ~7% perf on p101_row_sum
+alone (measured, session 07-03). That's a real, quantifiable Metal-
+specific pattern the model didn't know.
+
+### Real-world grounding for T3 and T4
+
+T3 tiled kernels are **the core of every neural net layer**. Every
+`nn.Linear`, `nn.Conv2d`, `torch.matmul` call ultimately dispatches
+to a tiled kernel. If an LLM can't write a working matmul, it can't
+write a custom fused layer that beats the framework.
+
+T4 fused kernels are **exactly what fast LLM inference stacks compete
+on**. RMSNorm-fused, SwiGLU, flash-attention variants — production
+ML performance work is fusing these ops to reduce dispatch overhead
+and memory bandwidth. That's what MPS's implementations do; that's
+what MSL-Bench is asking whether LLMs can also do.
+
+The T4 layernorm result from the 06-30 sessions (hand-tuned RMSNorm
+kernel at 8.7× MPS, one dispatch replacing four `torch.mean/sqrt/div/
+mul` calls) is the proof that this territory has real speedup wins
+available — the LLM benchmark measures how close models get.
+
+### Suggested phrasing for the report
+
+Consolidated line: **"Tiers are calibrated around what MSL-specific
+patterns each problem forces the model to use — T1 needs no Metal-
+specific knowledge (it's C math with Metal boilerplate); T2 requires
+threadgroup memory and barriers; T3 requires tile staging; T4 requires
+all of the above plus fusion awareness. The tier gradient is a proxy
+for 'how much of the Metal Shading Language do you actually need to
+know?'"**
+
+Complementary line: **"Every model tested handles T1 fine and cliff-
+drops at T2. The cliff is universal because that's precisely where
+MSL and CUDA diverge — CUDA's `__syncthreads()` has no memory-scope
+flag; Metal's `threadgroup_barrier` does, and picking the wrong one
+costs measurable performance even when the kernel verifies correct."**
+
+Would fit as a §2 or §3 addition to REPORT.md.
+
+---
+
 ## 2026-07-09 — the qwen3 fair-budget experiment: bigger `<think>` is actively worse
 
 Ran the fair-budget rebuttal to the "qwen3 is bad because `<think>`
