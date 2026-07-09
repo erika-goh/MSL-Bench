@@ -208,6 +208,31 @@
   }
   .tier-legend b { color: var(--text-2); font-weight: 500; }
 
+  /* Highlighted callout — used for the "no perfect scores" headline */
+  .callout {
+    border-left: 2px solid var(--accent);
+    padding: 0.15rem 0 0.15rem 1.35rem;
+    margin: 2rem 0 2.25rem;
+    max-width: 720px;
+  }
+  .callout p {
+    color: var(--text-2);
+    font-size: 1rem;
+    line-height: 1.75;
+    margin: 0 0 0.85rem;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout strong { color: var(--text); font-weight: 500; }
+  .callout em { color: var(--text); font-style: italic; }
+  .callout code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.86em;
+    color: var(--accent);
+    padding: 0.05em 0.35em;
+    background: rgba(64,121,20,0.09);
+    border-radius: 3px;
+  }
+
   /* ═══ SUMMARY CARDS ═══ */
   .cards {
     display: grid;
@@ -589,6 +614,10 @@
         <div class="value" style="color:#ff8a80" id="card-unbeaten">–</div>
         <div class="sub">0 correct across all runs</div>
       </div>
+    </div>
+    <div class="callout">
+      <p><strong>No model has run through the 60 problems anywhere close to perfectly.</strong> The best full-suite performer — <code>gpt-oss-120b</code> — got <strong>45% of problems correct</strong>, and only <strong>38%</strong> of those matched Apple's own MPS speed. The bottom of the leaderboard sits at 0%.</p>
+      <p>Every model handles T1 elementwise (some hit 100%), but the failure rate climbs sharply from T2 onwards. T3 tiled kernels and T4 fused ops — matmul, convolution, attention, layernorm — sit at <em>~80% failure across the entire roster</em>. That's the benchmark's headline finding: LLMs write simple GPU kernels; they don't yet write the ones that matter for modern ML workloads.</p>
     </div>
   </section>
 
