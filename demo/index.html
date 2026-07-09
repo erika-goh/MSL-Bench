@@ -626,7 +626,7 @@
     <div class="prose">
       <p>Three angles on the same data. The <strong>fast_p curve</strong> is the money chart — it shows cumulative correctness across every speedup threshold. A curve staying high past the <code>= MPS</code> dashed line means the model isn't just writing correct kernels; it's writing ones that <strong>match or beat Apple's own implementation</strong>.</p>
       <p>The <strong>tier bars</strong> break correctness down by difficulty. <code>T1</code> is elementwise math like <code>out[i] = f(x[i])</code>. <code>T2</code> is reductions (row sums, softmax) — the first tier requiring cross-thread coordination via threadgroup memory and barriers. <code>T3</code> is tiled kernels (matmul, convolution). <code>T4</code> is fused ops (attention, layernorm, GLU) — the actual building blocks of modern LLMs. The <strong>T1 → T2 cliff</strong> is universal across every model tested: everyone handles elementwise Metal, everyone cliff-dives on cross-thread coordination.</p>
-      <p><strong>Failure modes</strong> shows where each run breaks — green is correct, grays are the ways things went wrong. A shorter green bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
+      <p><strong>Failure modes</strong> shows where each run breaks. The colored segment on each bar is that run's correct kernels — painted in the model's line color from the charts above. Grays are the ways things went wrong: light gray for verify-fail (compiled + ran but wrong numbers), progressively darker for compile-fail, runtime-fail, provider error, and no code emitted. A short colored bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
     </div>
     <div class="charts">
       <div class="chart">
@@ -5109,7 +5109,11 @@ function attachTierInteractions(id)  { attachInteractions(id, 'tier');  }
       const count = r.counts[stage];
       if (count === 0) return;
       const w = count * xScale;
-      svg += `<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="${barH}" fill="${STAGE_COLORS[stage]}"/>`;
+      // The "correct" segment gets the model's distinct color (matches the
+      // fast_p and tier charts). Failure modes stay grayscale so the eye
+      // reads "colored = worked, gray = failure mode."
+      const fill = stage === 'correct' ? PALETTE[ri] : STAGE_COLORS[stage];
+      svg += `<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="${barH}" fill="${fill}"/>`;
       if (w >= 18) {
         const textFill = stage === 'correct' ? '#050505' : 'rgba(5,5,5,0.85)';
         svg += `<text x="${(x + w / 2).toFixed(1)}" y="${y + barH / 2 + 3.5}" text-anchor="middle" style="fill:${textFill};font-family:'JetBrains Mono';font-size:10px;font-weight:500">${count}</text>`;
@@ -5119,9 +5123,11 @@ function attachTierInteractions(id)  { attachInteractions(id, 'tier');  }
   });
   svg += `</svg>`;
 
+  // Legend: "correct" swatch shown as accent green (representative), rest gray-scale
   let legend = `<div class="legend">`;
   STAGE_ORDER.forEach(s => {
-    legend += `<span class="item"><span class="swatch" style="background:${STAGE_COLORS[s]};width:12px;height:8px"></span>${s}</span>`;
+    const swatchColor = s === 'correct' ? ACCENT : STAGE_COLORS[s];
+    legend += `<span class="item"><span class="swatch" style="background:${swatchColor};width:12px;height:8px"></span>${s}</span>`;
   });
   legend += `</div>`;
 

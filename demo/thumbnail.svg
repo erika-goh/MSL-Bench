@@ -115,17 +115,17 @@
 <rect x="1158.4" y="742.0" width="15.2" height="16" fill="rgba(237,237,237,0.72)"/>
 <rect x="1173.6" y="742.0" width="7.6" height="16" fill="rgba(237,237,237,0.22)"/>
 <text x="1042.0" y="779.5" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9.5" fill="#6b6b6b" letter-spacing="0.02em">gemini · gemini-2.5-flash · o…</text>
-<rect x="1052.0" y="768.0" width="106.4" height="16" fill="#407914"/>
+<rect x="1052.0" y="768.0" width="106.4" height="16" fill="#6b8fa5"/>
 <text x="1105.2" y="779.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="#050505" font-weight="500">14</text>
 <rect x="1158.4" y="768.0" width="45.6" height="16" fill="rgba(237,237,237,0.44)"/>
 <text x="1181.2" y="779.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">6</text>
 <rect x="1204.0" y="768.0" width="7.6" height="16" fill="rgba(237,237,237,0.22)"/>
 <rect x="1211.6" y="768.0" width="7.6" height="16" fill="rgba(237,237,237,0.12)"/>
 <text x="1042.0" y="805.5" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9.5" fill="#6b6b6b" letter-spacing="0.02em">gemini · gemini-2.5-flash · r…</text>
-<rect x="1052.0" y="794.0" width="7.6" height="16" fill="#407914"/>
+<rect x="1052.0" y="794.0" width="7.6" height="16" fill="#c8a367"/>
 <rect x="1059.6" y="794.0" width="7.6" height="16" fill="rgba(237,237,237,0.22)"/>
 <text x="1042.0" y="831.5" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9.5" fill="#6b6b6b" letter-spacing="0.02em">groq · openai-gpt-oss-120b · …</text>
-<rect x="1052.0" y="820.0" width="205.2" height="16" fill="#407914"/>
+<rect x="1052.0" y="820.0" width="205.2" height="16" fill="#906188"/>
 <text x="1154.6" y="831.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="#050505" font-weight="500">27</text>
 <rect x="1257.2" y="820.0" width="30.4" height="16" fill="rgba(237,237,237,0.72)"/>
 <text x="1272.4" y="831.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">4</text>
@@ -133,7 +133,7 @@
 <text x="1390.2" y="831.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">27</text>
 <rect x="1492.8" y="820.0" width="15.2" height="16" fill="rgba(237,237,237,0.12)"/>
 <text x="1042.0" y="857.5" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9.5" fill="#6b6b6b" letter-spacing="0.02em">groq · llama-3.3-70b · one_sh…</text>
-<rect x="1052.0" y="846.0" width="144.4" height="16" fill="#407914"/>
+<rect x="1052.0" y="846.0" width="144.4" height="16" fill="#b3735c"/>
 <text x="1124.2" y="857.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="#050505" font-weight="500">19</text>
 <rect x="1196.4" y="846.0" width="38.0" height="16" fill="rgba(237,237,237,0.72)"/>
 <text x="1215.4" y="857.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">5</text>
@@ -141,7 +141,7 @@
 <text x="1302.8" y="857.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">18</text>
 <rect x="1371.2" y="846.0" width="7.6" height="16" fill="rgba(237,237,237,0.22)"/>
 <text x="1042.0" y="883.5" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9.5" fill="#6b6b6b" letter-spacing="0.02em">groq · llama-3.1-8b · one_shot</text>
-<rect x="1052.0" y="872.0" width="129.2" height="16" fill="#407914"/>
+<rect x="1052.0" y="872.0" width="129.2" height="16" fill="#5c9c8a"/>
 <text x="1116.6" y="883.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="#050505" font-weight="500">17</text>
 <rect x="1181.2" y="872.0" width="38.0" height="16" fill="rgba(237,237,237,0.72)"/>
 <text x="1200.2" y="883.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">5</text>
@@ -149,7 +149,7 @@
 <text x="1359.8" y="883.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">37</text>
 <rect x="1500.4" y="872.0" width="7.6" height="16" fill="rgba(237,237,237,0.22)"/>
 <text x="1042.0" y="909.5" text-anchor="end" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9.5" fill="#6b6b6b" letter-spacing="0.02em">groq · qwen-qwen3-32b · one_s…</text>
-<rect x="1052.0" y="898.0" width="38.0" height="16" fill="#407914"/>
+<rect x="1052.0" y="898.0" width="38.0" height="16" fill="#c2b280"/>
 <text x="1071.0" y="909.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="#050505" font-weight="500">5</text>
 <rect x="1090.0" y="898.0" width="273.6" height="16" fill="rgba(237,237,237,0.44)"/>
 <text x="1226.8" y="909.0" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="9" fill="rgba(5,5,5,0.85)" font-weight="500">36</text>

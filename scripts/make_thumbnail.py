@@ -304,13 +304,16 @@ def render_stage_chart(x0, y0, w, h, curves):
             if count == 0:
                 continue
             bw = count * x_scale
+            # Correct segment: this run's distinct color (matches the fast_p
+            # curve and tier bars). Failure segments: grayscale.
+            fill_color = curve_color(ri) if stage == "correct" else STAGE_COLORS[stage]
             parts.append(f'<rect x="{bx:.1f}" y="{y:.1f}" width="{bw:.1f}" '
-                         f'height="{bar_h}" fill="{STAGE_COLORS[stage]}"/>')
+                         f'height="{bar_h}" fill="{fill_color}"/>')
             if bw >= 18:
-                fill = "#050505" if stage == "correct" else "rgba(5,5,5,0.85)"
+                text_fill = "#050505" if stage == "correct" else "rgba(5,5,5,0.85)"
                 parts.append(f'<text x="{bx+bw/2:.1f}" y="{y+bar_h/2+3:.1f}" '
                              f'text-anchor="middle" font-family="{FONT_MONO}" '
-                             f'font-size="9" fill="{fill}" font-weight="500">'
+                             f'font-size="9" fill="{text_fill}" font-weight="500">'
                              f'{count}</text>')
             bx += bw
     return "\n".join(parts)
