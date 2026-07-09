@@ -65,7 +65,26 @@ def evaluate_kernel(kernel_src: str, problem: dict, reference) -> tuple[bool, st
     }
 
 
+def _preflight_deps() -> None:
+    """Fail fast if the interpreter can't run the verify step.
+
+    evaluate_kernel imports torch lazily (only after compile+run succeed), so a
+    missing torch would otherwise be caught by the outer exception handler and
+    silently recorded as `provider_error` — destroying the LLM output we paid
+    for. Better to bail out before spending any provider TPM.
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        print("ERROR: torch is not importable in this interpreter.", file=sys.stderr)
+        print("  run_suite.py needs torch for the verify step against PyTorch MPS references.", file=sys.stderr)
+        print(f"  Current interpreter: {sys.executable}", file=sys.stderr)
+        print("  Try:  .venv/bin/python scripts/run_suite.py ...", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
+    _preflight_deps()
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", required=True, choices=["groq", "gemini", "ollama"])
     ap.add_argument("--model", default=None)
