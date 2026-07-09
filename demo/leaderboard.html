@@ -160,6 +160,37 @@
   h2.h { font-size: 1.35rem; font-weight: 500; letter-spacing: -0.015em; margin-bottom: 0.5rem; }
   h2.h .count { color: var(--text-3); font-weight: 400; font-size: 0.85rem; margin-left: 0.5rem; font-family: 'JetBrains Mono', ui-monospace, monospace; }
 
+  /* Readable prose block — short explanations between sections */
+  .prose {
+    max-width: 680px;
+    color: var(--text-2);
+    font-size: 0.98rem;
+    line-height: 1.75;
+    margin: 0 0 1.5rem;
+  }
+  .prose p { margin: 0 0 0.85rem; }
+  .prose p:last-child { margin-bottom: 0; }
+  .prose strong { color: var(--text); font-weight: 500; }
+  .prose code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.86em;
+    color: var(--accent);
+    padding: 0.05em 0.35em;
+    background: rgba(64,121,20,0.09);
+    border-radius: 3px;
+  }
+  .prose em { color: var(--text); font-style: italic; }
+  .tier-legend {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.72rem;
+    color: var(--text-3);
+    letter-spacing: 0.04em;
+    margin-top: 0.85rem;
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid var(--line);
+  }
+  .tier-legend b { color: var(--text-2); font-weight: 500; }
+
   /* ═══ SUMMARY CARDS ═══ */
   .cards {
     display: grid;
@@ -283,7 +314,18 @@
   .cell.none { background: transparent; color: var(--text-3); cursor: default; border-color: transparent; opacity: 0.4; }
   .cell.none:hover { border-color: transparent; color: var(--text-3); }
 
-  .legend { display: flex; flex-wrap: wrap; gap: 0.85rem 1.25rem; padding: 0.85rem 1.25rem; border-top: 1px solid var(--line); color: var(--text-3); font-size: 0.78rem; align-items: center; }
+  .legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 0.65rem 1.5rem;
+    padding: 1rem 1.25rem;
+    border-top: 1px solid var(--line);
+    color: var(--text-3);
+    font-size: 0.82rem;
+    align-items: center;
+  }
+  .legend-item { display: inline-flex; align-items: center; gap: 0.7rem; }
+  .legend-item .cell { flex-shrink: 0; }
   .legend .cell { cursor: default; }
   .legend .cell:hover { border-color: transparent; color: var(--text-3); }
   .legend .cell.ok:hover { border-color: var(--accent-soft); color: var(--accent); }
@@ -455,9 +497,12 @@
   <div class="content-inner">
 
   <div class="page-head">
-    <div class="section-label">01 .leaderboard()</div>
+    <div class="section-label">01 .kernelbench()</div>
     <h1 class="page-title">LLM-generated <span class="accent">Metal</span> kernels, timed on GPU.</h1>
-    <p class="page-sub">Each candidate kernel is compiled with <code>xcrun metal</code>, executed on Apple Silicon, verified against a PyTorch MPS reference, and timed with GPU timestamps. Metric <code>fast_p</code> = fraction of problems correct AND ≥ <em>p</em>× MPS speed.</p>
+    <div class="prose" style="margin-top: 1.25rem">
+      <p><strong>Can a language model write GPU code that actually runs — and beats the hand-tuned libraries GPUs ship with?</strong> Every kernel below is a real <code>.metal</code> file, compiled with Apple's own <code>xcrun metal</code>, executed on Apple Silicon, verified against <a href="https://developer.apple.com/documentation/metalperformanceshaders" title="Metal Performance Shaders — Apple's optimized GPU compute library" style="color:var(--text);border-bottom:1px solid var(--accent-soft)">Metal Performance Shaders</a> (MPS, Apple's own GPU compute library), and timed with GPU timestamps. Nothing simulated.</p>
+      <p>The headline metric is <code>fast_p</code>: the fraction of problems where the model's kernel was both <em>correct</em> AND ran at least <em>p</em>× as fast as MPS. So <code>fast_1 = 40%</code> means the model got 40% of problems right with kernels that matched or beat Apple's implementation.</p>
+    </div>
   </div>
 
   <section>
@@ -487,7 +532,12 @@
   </section>
 
   <section>
-    <div class="section-label">02 .charts()</div>
+    <div class="section-label">02 .visualize()</div>
+    <div class="prose">
+      <p>Three angles on the same data. The <strong>fast_p curve</strong> is the money chart — it shows cumulative correctness across every speedup threshold. A curve staying high past the <code>= MPS</code> dashed line means the model isn't just writing correct kernels; it's writing ones that <strong>match or beat Apple's own implementation</strong>.</p>
+      <p>The <strong>tier bars</strong> break correctness down by difficulty. <code>T1</code> is elementwise math like <code>out[i] = f(x[i])</code>. <code>T2</code> is reductions (row sums, softmax) — the first tier requiring cross-thread coordination via threadgroup memory and barriers. <code>T3</code> is tiled kernels (matmul, convolution). <code>T4</code> is fused ops (attention, layernorm, GLU) — the actual building blocks of modern LLMs. The <strong>T1 → T2 cliff</strong> is universal across every model tested: everyone handles elementwise Metal, everyone cliff-dives on cross-thread coordination.</p>
+      <p><strong>Failure modes</strong> shows where each run breaks — green is correct, grays are the ways things went wrong. A shorter green bar with lots of gray = the model reached for something ambitious but couldn't land it.</p>
+    </div>
     <div class="charts">
       <div class="chart">
         <h3>fast_p curves</h3>
@@ -512,6 +562,10 @@
   <section>
     <div class="section-label">03 .leaderboard()</div>
     <h2 class="h">Ranked runs <span class="count">· sorted by fast_1</span></h2>
+    <div class="prose">
+      <p>Sorted by <code>fast_1</code> — the fraction of problems where the model's kernel matched or beat MPS speed. Each row is one model on one <em>attempt strategy</em>: <code>one_shot</code> means the model gets one try per problem, no retries. <code>repair k=5</code> means the model gets to see its compile errors and try again — up to <em>5 attempts</em> per problem — with each failed attempt's error text fed back into the next prompt.</p>
+      <p>Rows marked <code>†</code> are partial samples where a free-tier quota wall cut the sweep short. Numbers from partial runs aren't directly comparable to full-suite runs. <code>n</code> = number of problems attempted (out of 60).</p>
+    </div>
     <table class="lb">
       <thead>
         <tr>
@@ -528,19 +582,25 @@
 
   <section>
     <div class="section-label">04 .grid()</div>
-    <h2 class="h">Per-problem outcome <span class="count">· click any cell for the kernel</span></h2>
+    <h2 class="h">Per-problem outcome <span class="count">· click any cell for the kernel source</span></h2>
+    <div class="prose">
+      <p>Every cell is one model's attempt on one problem. Click any cell to see the actual Metal kernel the model produced. Rows are grouped by tier (T1 → T4) then problem id; columns are the runs from the leaderboard.</p>
+    </div>
     <div class="grid-wrap">
       <div class="grid-scroll">
         <table class="grid" id="grid"></table>
       </div>
       <div class="legend">
-        <span class="cell ok">✓ 1.1×</span> correct
-        <span class="cell ok fast">✓ 2.5×</span> correct + ≥2× MPS
-        <span class="cell verify">v</span> verify failed
-        <span class="cell compile">c</span> compile error
-        <span class="cell runtime">r</span> runtime error
-        <span class="cell err">e</span> provider error
-        <span class="cell none">·</span> not run
+        <div class="legend-item"><span class="cell ok">✓&nbsp;1.1×</span> <span>compiled, ran, matched MPS reference (speedup shown)</span></div>
+        <div class="legend-item"><span class="cell ok fast">✓&nbsp;2.5×</span> <span>correct AND ≥2× MPS speed</span></div>
+        <div class="legend-item"><span class="cell verify">v</span> <span>compiled + ran but produced wrong numbers</span></div>
+        <div class="legend-item"><span class="cell compile">c</span> <span>invalid MSL syntax — didn't compile</span></div>
+        <div class="legend-item"><span class="cell runtime">r</span> <span>crashed at execution</span></div>
+        <div class="legend-item"><span class="cell err">e</span> <span>API / harness hiccup (not the model's fault)</span></div>
+        <div class="legend-item"><span class="cell none">·</span> <span>not attempted for this run</span></div>
+      </div>
+      <div class="tier-legend">
+        <b>TIER</b> · T1 elementwise <span style="opacity:.5">(out[i] = f(x[i]))</span> · T2 reductions <span style="opacity:.5">(row sums, softmax)</span> · T3 tiled <span style="opacity:.5">(matmul, convolution)</span> · T4 fused <span style="opacity:.5">(attention, layernorm, GLU)</span>
       </div>
     </div>
   </section>
@@ -4611,7 +4671,7 @@ document.getElementById('lb-body').innerHTML = runsSorted.map((r, i) => `
 
 // ---------- Render grid ----------
 const grid = document.getElementById('grid');
-let header = '<thead><tr><th>Problem</th><th style="text-align:center">T</th>';
+let header = '<thead><tr><th>Problem</th><th style="text-align:center" title="Difficulty tier — see legend below">Tier</th>';
 for (const r of RUNS) header += `<th class="rot">${r.label}</th>`;
 header += '</tr></thead>';
 
