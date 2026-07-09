@@ -476,6 +476,50 @@
   .axis-title { fill: var(--text-3); font-size: 10.5px; font-family: 'JetBrains Mono', ui-monospace, monospace; letter-spacing: 0.06em; }
   .grid-line { stroke: rgba(255,255,255,0.05); stroke-width: 1; }
   @media (max-width: 900px) { .charts .row2 { grid-template-columns: 1fr; } }
+
+  /* ═══ INTERACTIVE CHART LINES / BARS ═══ */
+  .chart svg .curve, .chart svg .curve-hit, .chart svg .tier-bar, .chart svg .tier-bar-hit {
+    cursor: pointer;
+    transition: opacity 0.15s ease, stroke-width 0.15s ease;
+  }
+  .chart svg .curve-hit, .chart svg .tier-bar-hit { pointer-events: all; }
+  /* When any curve is "focused" (hovered or pinned), non-focused curves dim */
+  .chart[data-focused] .curve:not(.focus) { opacity: 0.22; }
+  .chart[data-focused] .tier-bar:not(.focus) { opacity: 0.22; }
+  .chart svg .curve.focus { stroke-width: 2.25; }
+  .chart svg .tier-bar.focus { filter: brightness(1.15); }
+  .chart svg .curve.pinned { stroke-dasharray: none; }
+  .chart .legend-run { transition: opacity 0.15s ease; }
+  .chart[data-focused] .legend-run:not(.focus) { opacity: 0.35; }
+  .chart .legend-run.focus { color: var(--text); }
+  .chart .legend-run:hover { color: var(--text); }
+
+  /* Floating tooltip that follows the cursor */
+  .chart-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(8,8,8,0.96);
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    padding: 0.55rem 0.75rem;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.75rem;
+    color: var(--text);
+    letter-spacing: 0.02em;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+    z-index: 20;
+    opacity: 0;
+    transform: translate(-50%, calc(-100% - 12px));
+    transition: opacity 0.12s ease;
+    max-width: 340px;
+    white-space: nowrap;
+  }
+  .chart-tooltip.visible { opacity: 1; }
+  .chart-tooltip .tt-label { color: var(--accent); font-weight: 500; margin-bottom: 0.35rem; }
+  .chart-tooltip .tt-row { color: var(--text-2); font-size: 0.72rem; }
+  .chart-tooltip .tt-row b { color: var(--text); font-weight: 500; }
+  .chart-tooltip .tt-hint { color: var(--text-3); font-size: 0.68rem; margin-top: 0.4rem; font-style: italic; }
+  .chart { position: relative; }  /* so tooltip positions correctly */
 </style>
 </head>
 <body>
@@ -621,7 +665,7 @@
 </aside>
 
 <footer>
-  MSL-BENCH · v0.1 · raw data at <a href="https://github.com/erika-goh/MSL-Bench/tree/main/results/raw">results/raw/</a> · <a href="https://github.com/erika-goh/MSL-Bench">source</a>
+  MSL-BENCH · v0.1 · <a href="https://github.com/erika-goh/MSL-Bench/blob/main/REPORT.md">full report</a> · <a href="https://github.com/erika-goh/MSL-Bench/blob/main/NOTES.md">session notes</a> · <a href="https://github.com/erika-goh/MSL-Bench">source</a>
 </footer>
 
 <script>
@@ -4718,12 +4762,126 @@ function highlight(src) {
 }
 
 // ---------- Charts ----------
-// Portfolio palette: one accent green + a range of near-white grays. The
-// leader (highest fast_1) is the only line painted green; every other run is
-// a gray at decreasing opacity. Reads as a "signal vs. noise" hierarchy.
+// Curated editorial palette. Each LLM run gets a distinct mid-luminance
+// color so they're identifiable in the chart; hover / click adds a tooltip
+// with the run label + stats. Leader (highest fast_1) gets the portfolio
+// accent green.
 const ACCENT = '#407914';
-const RUN_COLORS = RUNS.map((r, i) => i === 0 ? ACCENT : `rgba(237,237,237,${(0.85 - i * 0.09).toFixed(2)})`);
-const PALETTE = RUN_COLORS;  // keep the name for downstream references
+const CURVE_PALETTE_EDITORIAL = [
+  ACCENT,      // forest green (leader)
+  '#6b8fa5',   // steel blue
+  '#c8a367',   // warm sand
+  '#906188',   // plum
+  '#b3735c',   // terracotta
+  '#5c9c8a',   // sea foam
+  '#c2b280',   // khaki
+  '#8a6d7d',   // mauve
+  '#90a373',   // sage green
+];
+const PALETTE = RUNS.map((_, i) => CURVE_PALETTE_EDITORIAL[i % CURVE_PALETTE_EDITORIAL.length]);
+
+// ---------- Chart interactivity ----------
+// Hover / click a line (fast_p) or bar (tier chart) to identify the run
+// and see its fast_p stats. Click pins the highlight until clicked again
+// or the user clicks outside the chart.
+function _makeTooltip(container) {
+  const tt = document.createElement('div');
+  tt.className = 'chart-tooltip';
+  container.appendChild(tt);
+  return tt;
+}
+
+function _renderTooltipContent(el, pinned) {
+  const label = el.dataset.runLabel || '(unknown run)';
+  const n = el.dataset.n;
+  const partial = el.dataset.partial === '1' ? '†' : '';
+  const f0 = el.dataset.fast0;
+  const f1 = el.dataset.fast1;
+  const f2 = el.dataset.fast2;
+  const tierPct = el.dataset.tierPct;
+  const tier = el.dataset.tier;
+  const tierRow = tierPct !== undefined
+    ? `<div class="tt-row"><b>T${tier}</b> · ${el.dataset.tierCorrect}/${el.dataset.tierAttempted} correct · <b>${tierPct}%</b></div>`
+    : '';
+  const overallRow = (f0 !== undefined)
+    ? `<div class="tt-row">n=<b>${n}${partial}</b> · fast_0=<b>${f0}%</b> · fast_1=<b>${f1}%</b> · fast_2=<b>${f2}%</b></div>`
+    : '';
+  const hint = pinned ? 'click again or click outside to unpin' : 'click to pin';
+  return `<div class="tt-label">${label}</div>${tierRow}${overallRow}<div class="tt-hint">${hint}</div>`;
+}
+
+function attachInteractions(containerId, chartKind) {
+  const body = document.getElementById(containerId);
+  const container = body.closest('.chart');
+  const svg = body.querySelector('svg');
+  if (!container || !svg) return;
+  const tooltip = _makeTooltip(container);
+  let pinnedIdx = null;
+
+  const targetSelector = chartKind === 'tier' ? '.tier-bar, .tier-bar-hit' : '.curve, .curve-hit, .legend-run';
+
+  function focus(idx) {
+    container.setAttribute('data-focused', 'true');
+    svg.querySelectorAll('[data-run-idx]').forEach(el => {
+      el.classList.toggle('focus', el.dataset.runIdx === String(idx));
+    });
+    container.querySelectorAll('.legend-run').forEach(el => {
+      el.classList.toggle('focus', el.dataset.runIdx === String(idx));
+    });
+  }
+  function clearFocus() {
+    container.removeAttribute('data-focused');
+    container.querySelectorAll('.focus').forEach(el => el.classList.remove('focus'));
+    tooltip.classList.remove('visible');
+  }
+  function positionTooltip(clientX, clientY) {
+    const rect = container.getBoundingClientRect();
+    tooltip.style.left = (clientX - rect.left) + 'px';
+    tooltip.style.top  = (clientY - rect.top)  + 'px';
+  }
+
+  container.querySelectorAll(targetSelector).forEach(el => {
+    el.addEventListener('mouseenter', (e) => {
+      if (pinnedIdx !== null && pinnedIdx !== el.dataset.runIdx) return;
+      focus(el.dataset.runIdx);
+      tooltip.innerHTML = _renderTooltipContent(el, pinnedIdx === el.dataset.runIdx);
+      positionTooltip(e.clientX, e.clientY);
+      tooltip.classList.add('visible');
+    });
+    el.addEventListener('mousemove', (e) => {
+      if (pinnedIdx !== null && pinnedIdx !== el.dataset.runIdx) return;
+      positionTooltip(e.clientX, e.clientY);
+    });
+    el.addEventListener('mouseleave', () => {
+      if (pinnedIdx !== null) return;
+      clearFocus();
+    });
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = el.dataset.runIdx;
+      if (pinnedIdx === idx) {
+        pinnedIdx = null;
+        clearFocus();
+      } else {
+        pinnedIdx = idx;
+        focus(idx);
+        tooltip.innerHTML = _renderTooltipContent(el, true);
+        positionTooltip(e.clientX, e.clientY);
+        tooltip.classList.add('visible');
+      }
+    });
+  });
+
+  document.addEventListener('click', (e) => {
+    if (pinnedIdx !== null && !container.contains(e.target)) {
+      pinnedIdx = null;
+      clearFocus();
+    }
+  });
+}
+
+function attachCurveInteractions(id) { attachInteractions(id, 'curve'); }
+function attachTierInteractions(id)  { attachInteractions(id, 'tier');  }
 
 // fast_p curves
 (function renderFastP() {
@@ -4774,23 +4932,31 @@ const PALETTE = RUN_COLORS;  // keep the name for downstream references
   svg += `<text class="axis-title" x="${padL + chartW / 2}" y="${H - 4}" text-anchor="middle">speedup threshold p (× MPS)</text>`;
   svg += `<text class="axis-title" x="14" y="${padT + chartH / 2}" text-anchor="middle" transform="rotate(-90 14 ${padT + chartH / 2})">fast_p</text>`;
 
-  // lines — 1.25px stroke, minimalist
+  // lines — 1.25px stroke, minimalist. Data-attrs let JS below wire up
+  // hover-to-identify + click-to-pin interactions.
+  // Draw invisible thicker "hit path" first for larger click/hover target,
+  // then the visible thin stroke on top.
   curves.forEach((c, i) => {
     const color = PALETTE[i % PALETTE.length];
     const d = c.pts.map(([x, y], j) => `${j === 0 ? 'M' : 'L'}${xToPx(x).toFixed(1)},${yToPx(y).toFixed(1)}`).join(' ');
-    svg += `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>`;
-    svg += `<circle cx="${xToPx(0).toFixed(1)}" cy="${yToPx(c.pts[0][1]).toFixed(1)}" r="2.5" fill="${color}"/>`;
+    const attrs = `data-run-idx="${i}" data-run-id="${c.id}" data-run-label="${c.label}" data-fast0="${(c.fast0*100).toFixed(1)}" data-fast1="${(c.fast1*100).toFixed(1)}" data-fast2="${(c.fast2*100).toFixed(1)}" data-n="${c.n}" data-partial="${c.partial?1:0}"`;
+    // Wide invisible hit target so users don't need pixel-precision to hover a 1.25px line
+    svg += `<path class="curve-hit" d="${d}" fill="none" stroke="transparent" stroke-width="14" stroke-linejoin="round" stroke-linecap="round" ${attrs}/>`;
+    // Visible line
+    svg += `<path class="curve" d="${d}" fill="none" stroke="${color}" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round" ${attrs}/>`;
+    svg += `<circle cx="${xToPx(0).toFixed(1)}" cy="${yToPx(c.pts[0][1]).toFixed(1)}" r="2.5" fill="${color}" ${attrs}/>`;
   });
 
   svg += `</svg>`;
 
   let legend = `<div class="legend">`;
   curves.forEach((c, i) => {
-    legend += `<span class="item"><span class="swatch" style="background:${PALETTE[i]}"></span>${c.label} <span style="color:var(--text-3)">n=${c.n}</span></span>`;
+    legend += `<span class="item legend-run" data-run-idx="${i}" data-run-id="${c.id}" style="cursor:pointer"><span class="swatch" style="background:${PALETTE[i]}"></span>${c.label} <span style="color:var(--text-3)">n=${c.n}</span></span>`;
   });
   legend += `</div>`;
 
   document.getElementById('chart-fastp-body').innerHTML = svg + legend;
+  attachCurveInteractions('chart-fastp-body');
 })();
 
 // Per-tier grouped bars
@@ -4833,13 +4999,17 @@ const PALETTE = RUN_COLORS;  // keep the name for downstream references
       const yPct = d.pct;
       const y = yToPx(yPct);
       const h = (H - padB) - y;
+      const r = RUNS[ri];
+      const attrs = `data-run-idx="${ri}" data-run-id="${r.id}" data-run-label="${r.label}" data-tier="${t}" data-tier-pct="${(yPct*100).toFixed(1)}" data-tier-attempted="${d.attempted}" data-tier-correct="${d.correct}"`;
       if (d.attempted === 0) {
         svg += `<line x1="${x.toFixed(1)}" y1="${(H - padB - 0.5).toFixed(1)}" x2="${(x + barW).toFixed(1)}" y2="${(H - padB - 0.5).toFixed(1)}" stroke="var(--text-3)" stroke-width="1" stroke-dasharray="2 3" opacity="0.5"/>`;
       } else if (yPct === 0) {
-        svg += `<rect x="${x.toFixed(1)}" y="${(H - padB - 1.5).toFixed(1)}" width="${barW.toFixed(1)}" height="1.5" fill="${color}" opacity="0.6"/>`;
+        svg += `<rect class="tier-bar" x="${x.toFixed(1)}" y="${(H - padB - 1.5).toFixed(1)}" width="${barW.toFixed(1)}" height="1.5" fill="${color}" opacity="0.6" ${attrs}/>`;
       } else {
-        svg += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(h, 1).toFixed(1)}" fill="${color}"/>`;
+        svg += `<rect class="tier-bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(h, 1).toFixed(1)}" fill="${color}" ${attrs}/>`;
       }
+      // Wider invisible hit target above short/zero bars so tiny bars are still clickable
+      svg += `<rect class="tier-bar-hit" x="${x.toFixed(1)}" y="${padT}" width="${barW.toFixed(1)}" height="${(chartH).toFixed(1)}" fill="transparent" ${attrs}/>`;
     });
     const cx = groupX + (RUNS.length * barW + (RUNS.length - 1) * barGap) / 2;
     svg += `<text class="axis-title" x="${cx.toFixed(1)}" y="${(H - padB + 18).toFixed(1)}" text-anchor="middle">T${t}</text>`;
@@ -4847,6 +5017,7 @@ const PALETTE = RUN_COLORS;  // keep the name for downstream references
 
   svg += `</svg>`;
   document.getElementById('chart-tier-body').innerHTML = svg;
+  attachTierInteractions('chart-tier-body');
 })();
 
 // Failure stage stacked horizontal bars
