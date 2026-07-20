@@ -55,8 +55,19 @@ they test transfer, not new capability. Two judgment calls worth recording:
 Each of the 15 goldens passes `run_problem.py` (compiled + correct), a
 sub-second single-kernel run — thermally fine, not a sweep. `make test-mac`
 still green (37 passed). Suite now 75 problems (60 train + 15 heldout).
-**Next:** when a future retrain lands, eval on `--split heldout` for the
-leak-free generalization number this whole split exists to provide.
+
+### First use of the split: fine-tune generalizes ZERO skill (leak-free)
+
+Ran the iter-50 adapter on `--split heldout --mode one_shot` (15 unseen
+problems): **0/15 correct, all compile-fail, 13/15 still emit OpenCL
+`get_global_id()`, 0/15 use a correct Metal attribute.** Same failure as the
+seed-set T2 eval, now on problems the model never trained on. The split did its
+job: it **rules out the "hidden skill masked by memorization" alternative** —
+there was no hidden skill. N=34 LoRA on a 4-bit 7B teaches nothing that
+transfers. This is the honest, defensible Phase-6 v0 conclusion: the flywheel
+runs end-to-end, but the seed set is ~10× too small to move capability.
+(A base-model control on held-out would confirm "no *change* vs base" too, but
+the seed-T2 control already showed that; not worth the extra heat right now.)
 
 ## 2026-07-20 (later) — Phase 6 first fine-tune: MLX-LM LoRA runs, two bugs, a thermal lesson
 
