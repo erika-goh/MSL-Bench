@@ -5,6 +5,46 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-20 (later still) — Phase 2.5: held-out test split (15 problems, leak-free eval)
+
+The Phase-6 eval's #1 carry-forward: without problems the model never trained
+on, any future "accuracy went up" partly measures memorization. Built the split.
+
+### Mechanism (chose A over a separate tree)
+
+`mkb/problems.py` auto-discovers every `tier*/p*/spec.py`, so held-out problems
+would silently pollute the 60-seed suite. Options were (A) a `split` field +
+`--split` filter, or (B) a separate `problems_heldout/` tree with its own
+discovery path. **Chose A**: the leak that matters is *training* on test
+problems, which happens at the SFT-export layer, not discovery — so a `split`
+field lets `export_sft.py` block it directly (filtering by spec, the source of
+truth, not by run tag). B's disk-isolation doesn't even address that leak and
+adds a second code path. Wiring: `"split": "heldout"` in the PROBLEM dict
+(default "train"); `run_suite --split {train,heldout,all}` default train (so the
+60-seed behaviour is unchanged); heldout runs tagged `_heldout` so they can't
+mix into the leaderboard; `export_sft` drops heldout transcripts.
+
+### Roster: idiom-faithful, not just op-diverse
+
+15 problems (T1×3, T2×4, T3×4, T4×4), NEW ops that reuse each tier's *idiom* so
+they test transfer, not new capability. Two judgment calls worth recording:
+- Swapped proposed `row_prod` -> `row_max_abs`: a product of 256 randn values
+  overflows/underflows, so float32 reduction-order differences would blow past
+  tolerance — a flaky test, not an idiom test.
+- For T3/T4, rejected gather/stencil ops (avg_pool-as-gather, bias+tanh) that
+  barely touch the tiling / fused-reduction idiom. Kept only ops that genuinely
+  stage tiles into threadgroup memory (matmul Aᵀ@B, A@Bᵀ) or fuse a real
+  reduction (layernorm-no-affine, groupnorm via *segmented* tree reduce,
+  log_softmax's two-pass max→sumexp).
+
+### Verified every golden
+
+Each of the 15 goldens passes `run_problem.py` (compiled + correct), a
+sub-second single-kernel run — thermally fine, not a sweep. `make test-mac`
+still green (37 passed). Suite now 75 problems (60 train + 15 heldout).
+**Next:** when a future retrain lands, eval on `--split heldout` for the
+leak-free generalization number this whole split exists to provide.
+
 ## 2026-07-20 (later) — Phase 6 first fine-tune: MLX-LM LoRA runs, two bugs, a thermal lesson
 
 First local fine-tune actually trained. Base `Qwen2.5-Coder-7B-Instruct-4bit`,

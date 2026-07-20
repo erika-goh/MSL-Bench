@@ -1,8 +1,9 @@
 # Phase 2.5 — Held-out test split: plan
 
-*Status: plan for review. Written 2026-07-20 after the Phase-6 v0 eval showed
-N=34 SFT gives no lift on T2 — and reminded us that any future "accuracy went
-up" is meaningless without problems the model was never trained on.*
+*Status: DONE (2026-07-20). Mechanism A wired; 15/15 held-out problems authored
+and golden-verified (T1×3, T2×4, T3×4, T4×4). Written after the Phase-6 v0 eval
+showed N=34 SFT gives no lift on T2 — and reminded us that any future "accuracy
+went up" is meaningless without problems the model was never trained on.*
 
 ## Why
 
