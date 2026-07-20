@@ -4,6 +4,7 @@ __pycache__/
 .build/
 .DS_Store
 results/raw/*.json
+results/sft/*.jsonl
 results/calibration.json
 .venv/
 *_run.log

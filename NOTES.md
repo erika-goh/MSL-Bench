@@ -42,6 +42,31 @@ error text, and does literally nothing for a weak one. Sharpens the Phase-4
 story: the benchmark now distinguishes "can't write the kernel" from "can't
 *fix* the kernel," and only the former is fatal for capable models.
 
+### First link toward Phase 6: SFT export (scripts/export_sft.py)
+
+Turned the repair transcripts into training data. Design decision worth
+recording — a repair flywheel wants two framings, and mixing them naively
+would train the model on broken kernels:
+
+- **write** (38 ex): collapse each converged trajectory to (system, problem)
+  -> FINAL correct kernel. The wrong intermediate attempts are dropped, so no
+  training target is ever a broken kernel.
+- **repair** (15 ex): the full converged trajectory for runs that actually
+  needed a fix (attempts > 1) — teaches "given a broken kernel + its error,
+  produce a corrected one." SFT tooling must mask loss to the final assistant
+  turn only; the earlier wrong turns are prompt context, not targets.
+- **dpo_negatives** (23): never-converged trajectories, kept separate and
+  labeled for future preference tuning — NOT folded into SFT (training on a
+  trajectory that ends wrong teaches wrong).
+
+Gotcha caught in validation: bare provider-abort records clean down to zero
+assistant turns (all that survived was the role:"error" marker). Filtered
+them out of the negatives — a negative with no kernel carries no signal.
+
+The JSONL is derived data (regenerable from results/raw via the script), so
+it's gitignored like the raw records; the repo tracks the exporter, not the
+dataset. The actual SFT run + re-benchmark live in the separate Phase-6 repo.
+
 ## 2026-07-19 — repair@5 flywheel completed: 60/60 seed transcripts, three quota walls, one harness fix
 
 Closed Phase 3: every one of the 60 problems now has a real repair@5
