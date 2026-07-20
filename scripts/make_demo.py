@@ -85,6 +85,69 @@ def build_runs(runs: dict[str, list[dict]], total_problems: int) -> list[dict]:
     return out
 
 
+def _base_and_mode(run_id: str) -> tuple[str, str]:
+    """Split a run id into (base_model, mode), dropping any _mt{N} budget suffix.
+
+    'groq_openai-gpt-oss-120b_repair_mt3000' -> ('groq_openai-gpt-oss-120b', 'repair')
+    'groq_llama-3.3-70b-versatile_one_shot'  -> ('groq_llama-3.3-70b-versatile', 'one_shot')
+    """
+    s = re.sub(r"_mt\d+$", "", run_id)
+    for mode in ("one_shot", "repair"):
+        if s.endswith("_" + mode):
+            return s[: -(len(mode) + 1)], mode
+    return s, "?"
+
+
+def _model_short(base: str) -> str:
+    _, _, model = base.partition("_")
+    return model.replace("-versatile", "").replace("-instant", "")
+
+
+def build_repair_lift(runs_recs: dict[str, list[dict]]) -> list[dict]:
+    """Paired one_shot-vs-repair correctness, by tier, over problems a model ran in BOTH modes.
+
+    A fair comparison only counts problems present in both modes for the same
+    base model (mt-budget variants collapse together). Surfaces the finding that
+    repair@5 lifts a strong model but not a weak one — the lift only lands if the
+    model can act on the feedback.
+    """
+    modes: dict[str, dict[str, dict[str, bool]]] = {}
+    tier_of: dict[str, int] = {}
+    for run_id, recs in runs_recs.items():
+        base, mode = _base_and_mode(run_id)
+        if mode not in ("one_shot", "repair"):
+            continue
+        table = modes.setdefault(base, {}).setdefault(mode, {})
+        for r in recs:
+            table[r["problem"]] = bool(r.get("correct"))
+            tier_of[r["problem"]] = r["tier"]
+
+    out = []
+    for base, mm in modes.items():
+        if "one_shot" not in mm or "repair" not in mm:
+            continue
+        shared = set(mm["one_shot"]) & set(mm["repair"])
+        if len(shared) < 5:  # too few paired problems to be worth plotting
+            continue
+        by_tier: dict[int, dict[str, int]] = {}
+        for pid in shared:
+            b = by_tier.setdefault(tier_of[pid], {"shared": 0, "oneShot": 0, "repair": 0})
+            b["shared"] += 1
+            b["oneShot"] += mm["one_shot"][pid]
+            b["repair"] += mm["repair"][pid]
+        tiers = [{"tier": t, **by_tier[t]} for t in sorted(by_tier)]
+        out.append({
+            "id": base,
+            "model": _model_short(base),
+            "tiers": tiers,
+            "totalShared": len(shared),
+            "totalLift": sum(t["repair"] - t["oneShot"] for t in tiers),
+        })
+    # Biggest lift first so the strong-model story leads and flat contrasts follow.
+    out.sort(key=lambda m: -m["totalLift"])
+    return out
+
+
 def cell_from_record(r: dict) -> dict:
     if r.get("correct"):
         return {"stage": "ok", "speedup": r.get("speedup")}
@@ -186,6 +249,7 @@ def main() -> None:
     runs_index = build_runs(runs_recs, total_problems)
     problems = build_problems(runs_index, runs_recs)
     samples = build_samples(runs_recs, prompts)
+    repair_lift = build_repair_lift(runs_recs)
 
     data = {
         "generated": time.strftime("%Y-%m-%d"),
@@ -193,6 +257,7 @@ def main() -> None:
         "runs": runs_index,
         "problems": problems,
         "samples": samples,
+        "repairLift": repair_lift,
     }
 
     new_block = render_data_block(data)

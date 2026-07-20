@@ -5,6 +5,43 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-20 — Groq TPD is a rolling window; demo gets a repair-lift chart
+
+### Lesson: a single successful request does NOT prove a quota reset
+
+Tried to build a clean single-model gpt-oss-120b repair curve (reuse the T3
+seeds, fill T1/T2/T4) now that it was "a new day." Probed with one small
+request — it succeeded — so I read the TPD as reset and launched the sweep.
+It 413'd/429'd on the second problem: `Used 199114 / Limit 200000`.
+
+Groq's TPD is a **trailing 24h rolling window, not a calendar-day reset.**
+Last night's ~200k was still inside the window, leaving ~900 tokens of
+headroom that my tiny probe slipped through — a false green light. **Check
+the `Used N / Limit M` figure in a 429, not just "did one request go
+through."** The single-model curve is blocked until last night's tokens age
+out (~24h) or a paid Dev tier lifts the cap. Logged as a blocked task.
+
+### Demo: `.repair_lift()` — the honest one_shot-vs-repair chart
+
+The leaderboard sorts by `fast_1` (speed), which hides the actual repair
+finding (a *correctness* story). Added a paired-bars small-multiples chart
+(scripts/make_demo.py `build_repair_lift` + hand-rolled SVG in index.html).
+
+Key design constraint for honesty: **compare only problems a model ran in
+BOTH modes** (mt-budget variants collapse to one base model). The chart then
+shows the contrast that matters:
+
+    gpt-oss-120b  T3: one_shot 3/15 -> repair 13/15  (+10)
+    gpt-oss-120b  T4: one_shot 0/4  -> repair  3/4   (+3)
+    llama-3.3-70b T2: one_shot 4/12 -> repair  4/12  (+0)   <- flat
+    llama-3.1-8b  T4: one_shot 1/11 -> repair  1/11  (+0)   <- flat
+
+**Repair@5 is a force multiplier on capability, not a floor under it.** It
+recovers most of the T3 cliff for a strong model that can act on its own
+error text, and does literally nothing for a weak one. Sharpens the Phase-4
+story: the benchmark now distinguishes "can't write the kernel" from "can't
+*fix* the kernel," and only the former is fatal for capable models.
+
 ## 2026-07-19 — repair@5 flywheel completed: 60/60 seed transcripts, three quota walls, one harness fix
 
 Closed Phase 3: every one of the 60 problems now has a real repair@5

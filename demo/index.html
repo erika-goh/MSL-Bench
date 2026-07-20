@@ -651,6 +651,17 @@
           <div id="chart-stage-body"></div>
         </div>
       </div>
+      <div style="margin-top: 2rem">
+        <div class="section-label">.repair_lift()</div>
+        <div class="prose">
+          <p>The same model, two attempt strategies, scored only on the problems it ran <em>both</em> ways. <code>repair k=5</code> lets the model see its own compile and verify errors and try again — but the lift only lands if the model is strong enough to act on that feedback. <strong>gpt-oss-120b jumps from 3/15 to 13/15 on tiled kernels (T3)</strong>; <strong>llama-3.3-70b doesn't move at all</strong> — it can't use the error text, so five tries score the same as one. Repair is a force multiplier on capability, not a floor under it.</p>
+        </div>
+        <div class="chart">
+          <h3>Does repair@5 actually help?</h3>
+          <div class="subtitle">Correct kernels, <code>one_shot</code> vs <code>repair k=5</code>, per tier — counted only on problems run in both modes (n per tier shown). Green = repair.</div>
+          <div id="chart-repairlift-body"></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -5271,7 +5282,69 @@ const DATA = {
       "attempts": 1,
       "timestamp": "2026-07-02T12:41:41"
     }
-  }
+  },
+  "repairLift": [
+    {
+      "id": "groq_openai-gpt-oss-120b",
+      "model": "openai-gpt-oss-120b",
+      "tiers": [
+        {
+          "tier": 3,
+          "shared": 15,
+          "oneShot": 3,
+          "repair": 13
+        },
+        {
+          "tier": 4,
+          "shared": 4,
+          "oneShot": 0,
+          "repair": 3
+        }
+      ],
+      "totalShared": 19,
+      "totalLift": 13
+    },
+    {
+      "id": "groq_llama-3.1-8b-instant",
+      "model": "llama-3.1-8b",
+      "tiers": [
+        {
+          "tier": 2,
+          "shared": 1,
+          "oneShot": 0,
+          "repair": 0
+        },
+        {
+          "tier": 4,
+          "shared": 11,
+          "oneShot": 1,
+          "repair": 1
+        }
+      ],
+      "totalShared": 12,
+      "totalLift": 0
+    },
+    {
+      "id": "groq_llama-3.3-70b-versatile",
+      "model": "llama-3.3-70b",
+      "tiers": [
+        {
+          "tier": 1,
+          "shared": 15,
+          "oneShot": 15,
+          "repair": 15
+        },
+        {
+          "tier": 2,
+          "shared": 12,
+          "oneShot": 4,
+          "repair": 4
+        }
+      ],
+      "totalShared": 27,
+      "totalLift": 0
+    }
+  ]
 };
 // <<<GEN_DATA_END
 
@@ -5284,6 +5357,7 @@ const PROBLEMS = DATA.problems.map(p => [p.pid, p.tier, p.cells]);
 // Sample transcripts (kernel + prompt per cell) — keys are `problem|run_id`.
 // Populated by make_demo.py from results/raw/ transcripts.
 const SAMPLES = DATA.samples;
+const REPAIR_LIFT = DATA.repairLift || [];
 
 // ---------- Populate header + summary cards from DATA ----------
 (function fillSummary() {
@@ -5698,6 +5772,56 @@ function attachTierInteractions(id)  { attachInteractions(id, 'tier');  }
   legend += `</div>`;
 
   document.getElementById('chart-stage-body').innerHTML = svg + legend;
+})();
+
+// Repair lift: paired one_shot vs repair bars, small-multiples per model.
+// The story is the CONTRAST — a big green jump for the strong model, flat
+// bars for the weak one — so each model gets its own panel on a shared axis.
+(function renderRepairLift() {
+  const el = document.getElementById('chart-repairlift-body');
+  if (!el || !REPAIR_LIFT.length) { if (el) el.innerHTML = ''; return; }
+  const OS = 'rgba(64,121,20,0.28)';  // one_shot: muted green
+  const RP = '#407914';               // repair: the "correct" green used elsewhere
+
+  const panelW = 188, gap = 46, padT = 20, padB = 46, padL = 34, padR = 8, chartH = 150;
+  const H = padT + chartH + padB;
+  const models = REPAIR_LIFT;
+  const totalW = padL + models.length * panelW + (models.length - 1) * gap + padR;
+  const yToPx = f => padT + (1 - f) * chartH;
+
+  let svg = `<svg viewBox="0 0 ${totalW} ${H}" preserveAspectRatio="xMidYMid meet">`;
+  for (let f = 0; f <= 1.001; f += 0.25) {
+    const yp = yToPx(f);
+    svg += `<line class="grid-line" x1="${padL}" y1="${yp.toFixed(1)}" x2="${(totalW - padR).toFixed(1)}" y2="${yp.toFixed(1)}"/>`;
+    svg += `<text class="axis-label" x="${padL - 6}" y="${(yp + 3).toFixed(1)}" text-anchor="end">${Math.round(f * 100)}%</text>`;
+  }
+
+  models.forEach((m, mi) => {
+    const px = padL + mi * (panelW + gap);
+    const groupW = panelW / m.tiers.length;
+    const barW = Math.min(26, groupW * 0.30), bg = 8;
+    m.tiers.forEach((t, ti) => {
+      const gx = px + ti * groupW + groupW / 2;
+      const osF = t.shared ? t.oneShot / t.shared : 0;
+      const rpF = t.shared ? t.repair / t.shared : 0;
+      const x0 = gx - barW - bg / 2, x1 = gx + bg / 2;
+      const y0 = yToPx(osF), y1 = yToPx(rpF);
+      svg += `<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max((padT + chartH) - y0, 1).toFixed(1)}" fill="${OS}"/>`;
+      svg += `<rect x="${x1.toFixed(1)}" y="${y1.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max((padT + chartH) - y1, 1).toFixed(1)}" fill="${RP}"/>`;
+      svg += `<text x="${(x0 + barW / 2).toFixed(1)}" y="${(y0 - 4).toFixed(1)}" text-anchor="middle" class="axis-label">${t.oneShot}</text>`;
+      svg += `<text x="${(x1 + barW / 2).toFixed(1)}" y="${(y1 - 4).toFixed(1)}" text-anchor="middle" class="axis-label" style="fill:${RP};font-weight:600">${t.repair}</text>`;
+      svg += `<text x="${gx.toFixed(1)}" y="${(padT + chartH + 16).toFixed(1)}" text-anchor="middle" class="axis-title">T${t.tier}</text>`;
+      svg += `<text x="${gx.toFixed(1)}" y="${(padT + chartH + 28).toFixed(1)}" text-anchor="middle" class="axis-label" style="opacity:0.55">n=${t.shared}</text>`;
+    });
+    const cx = px + panelW / 2;
+    svg += `<text x="${cx.toFixed(1)}" y="12" text-anchor="middle" style="fill:var(--text-3);font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.02em">${m.model}</text>`;
+    const badge = m.totalLift > 0 ? `+${m.totalLift}` : `${m.totalLift}`;
+    svg += `<text x="${cx.toFixed(1)}" y="${(H - 8).toFixed(1)}" text-anchor="middle" style="fill:${m.totalLift > 0 ? RP : 'var(--text-3)'};font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600">${badge} correct</text>`;
+  });
+  svg += `</svg>`;
+
+  const legend = `<div class="legend"><span class="item"><span class="swatch" style="background:${OS};width:12px;height:8px"></span>one_shot</span><span class="item"><span class="swatch" style="background:${RP};width:12px;height:8px"></span>repair k=5</span></div>`;
+  el.innerHTML = svg + legend;
 })();
 
 // ---------- Drawer ----------
