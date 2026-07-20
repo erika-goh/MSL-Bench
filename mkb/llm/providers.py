@@ -4,6 +4,7 @@ Providers:
 - groq:   free tier, OpenAI-compatible API.  env: GROQ_API_KEY
 - gemini: free tier (Gemini Flash).           env: GEMINI_API_KEY
 - ollama: fully local, no key.                env: OLLAMA_HOST (optional)
+- local:  MLX-LM server, OpenAI-compatible.   env: MLX_HOST (optional)
 
 All providers expose the same call signature:
     complete(messages: list[{"role","content"}], model: str) -> str
@@ -95,7 +96,27 @@ def ollama(messages: list[dict], model: str = "qwen2.5-coder:14b",
     return res["message"]["content"]
 
 
-PROVIDERS = {"groq": groq, "gemini": gemini, "ollama": ollama}
+def local(messages: list[dict], model: str = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+          max_tokens: int = DEFAULT_MAX_TOKENS) -> str:
+    """MLX-LM server (OpenAI-compatible) serving a base model + LoRA adapter.
+
+    Start it with, e.g.:
+        mlx_lm.server --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit \\
+                      --adapter-path phase6/adapters_iter50
+    The `model` field MUST match the server's --model: the server keys on it to
+    reuse the preloaded (adapter-applied) instance. An unknown value is treated
+    as a HF repo id and download-attempted. env: MLX_HOST (default :8080).
+    """
+    host = os.environ.get("MLX_HOST", "http://localhost:8080")
+    res = _post_json(
+        f"{host}/v1/chat/completions",
+        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens},
+        {},
+    )
+    return res["choices"][0]["message"]["content"]
+
+
+PROVIDERS = {"groq": groq, "gemini": gemini, "ollama": ollama, "local": local}
 
 
 def complete(provider: str, messages: list[dict], model: str | None = None,

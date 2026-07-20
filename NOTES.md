@@ -55,14 +55,52 @@ us `0000050_adapters.safetensors` as the best-generalizing checkpoint.
 **Benchmark that one.** (This is why 34 examples is a proof-of-concept, not a
 model — expected per the phase-6 plan.)
 
-### Carry-forward
+### Serving: skipped fuse+GGUF, served the adapter directly
 
-- Next step is fuse(iter-50) -> serve -> re-benchmark. **The benchmark is the
-  next heat session** (60 problems of inference > the training we just did),
-  so plan it: probe one tier (T2, where idiom uptake should show), check temps,
-  then decide on the full suite. Confirm before launching per thermal rule.
-- Honest-eval framing still holds: report failure-mode shift + T2/T3 tier gains
-  (idiom uptake), NOT headline accuracy (same-suite seeds = partial memorization).
+Plan said fuse -> GGUF -> Ollama. Cheaper route: `mlx_lm.server --adapter-path`
+serves base+LoRA over an OpenAI-compatible API, no fuse, no lossy 4-bit->GGUF.
+Added a `local` provider to `mkb/llm/providers.py` (~15 lines, mirrors `groq()`,
+points at :8080, no key) + `--provider local` in run_suite. Two gotchas:
+- The request `model` field is NOT ignored — the server keys on it to pick the
+  loaded model, and an unknown value is download-attempted as a HF repo (got a
+  404 on placeholder "mlx-local"). Must pass the exact base repo id.
+- Base-vs-FT control needs distinct run tags. FT run used default model label
+  (`local_default_one_shot`); base control passed `--model <base repo id>` so
+  the tag differs and files don't collide.
+
+### Eval: N=34 SFT gives NO functional lift on T2 (rigorous, with control)
+
+T2 one_shot, iter-50 adapter vs base Qwen2.5-Coder-7B-4bit, same 15 problems:
+
+                        base    FT(iter50)
+    T2 pass             0/15    0/15
+    OpenCL get_*_id     12/15   13/15    (within noise @ temp 0.2)
+    correct [[thread]]   2/15    2/15
+    fail stage        compile  compile
+
+Identical. **Skeptical checks that make this a real finding, not an artifact:**
+- Not a data bug: 0/34 training targets use OpenCL, 34/34 use `[[thread_...]]`.
+- Not a parse/`<|im_end|>` artifact: fences clean, token stripped.
+- **Not an adapter-not-loaded artifact** (the important one): greedy (temp 0)
+  same-prompt diff, base vs +adapter, outputs differ completely -> adapter IS
+  active. Base emits `get_global_id(0)`; adapter emits
+  `[[thread_position_in_grid(0)]]` ... `(1)(2)(3)` on six params. So SFT DID
+  shift OpenCL->Metal *surface form*, but learned the token not the grammar
+  (it's a single unindexed attribute on one param) -> still won't compile.
+
+**Conclusion:** the flywheel machinery works end-to-end (train->serve->bench->
+mechanistic readout), but 34 examples is far too little to move a 4-bit 7B's
+OpenCL prior into correct MSL. Textbook undertraining, shown by mechanism.
+Matches the plan's "38 is tiny, expect noise" caveat, now with a control.
+
+### Carry-forward (real lift needs, in priority order)
+
+1. **~10x more seed data** — more models sweeping repair over more problems.
+2. **Held-out problem split** (Phase-2.5: author ~15 reserved test problems) so
+   any future "accuracy went up" isn't same-suite memorization.
+3. Consider a non-4bit base and/or greedy decoding (temp 0) for the eval to cut
+   sampling noise. 34-ex on 4-bit was never going to show lift; don't over-read.
+4. dpo_negatives (23) still unused — preference tuning is a later lever.
 
 ## 2026-07-20 — Groq TPD is a rolling window; demo gets a repair-lift chart
 

@@ -86,7 +86,7 @@ def _preflight_deps() -> None:
 def main() -> None:
     _preflight_deps()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--provider", required=True, choices=["groq", "gemini", "ollama"])
+    ap.add_argument("--provider", required=True, choices=["groq", "gemini", "ollama", "local"])
     ap.add_argument("--model", default=None)
     ap.add_argument("--mode", choices=["one_shot", "repair"], default="one_shot")
     ap.add_argument("--k", type=int, default=5)

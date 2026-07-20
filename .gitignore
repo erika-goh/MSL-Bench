@@ -8,6 +8,7 @@ results/sft/*.jsonl
 results/calibration.json
 phase6/data/
 phase6/adapters/
+phase6/adapters_iter50/
 .venv/
 *_run.log
 *_backfill.log
