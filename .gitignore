@@ -6,6 +6,8 @@ __pycache__/
 results/raw/*.json
 results/sft/*.jsonl
 results/calibration.json
+phase6/data/
+phase6/adapters/
 .venv/
 *_run.log
 *_backfill.log
