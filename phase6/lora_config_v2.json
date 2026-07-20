@@ -1,0 +1,23 @@
+{
+    "model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+    "train": true,
+    "data": "phase6/data",
+    "adapter_path": "phase6/adapters_v2",
+    "fine_tune_type": "lora",
+    "num_layers": 16,
+    "batch_size": 1,
+    "iters": 300,
+    "learning_rate": 5e-05,
+    "max_seq_length": 2048,
+    "mask_prompt": true,
+    "lora_parameters": {
+        "rank": 16,
+        "dropout": 0.0,
+        "scale": 20.0
+    },
+    "grad_checkpoint": true,
+    "steps_per_report": 20,
+    "steps_per_eval": 50,
+    "save_every": 50,
+    "seed": 0
+}

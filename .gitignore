@@ -15,3 +15,5 @@ phase6/adapters_iter50/
 results/logs/
 /tmp/
 .vercel/
+phase6/adapters_v2/
+phase6/adapters_v2_*.log

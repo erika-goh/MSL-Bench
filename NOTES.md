@@ -5,6 +5,42 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-20 (v2 training) — config WAS throttling it: idiom moves on held-out
+
+Went back to the fine-tune after the null result, on the hypothesis that v0's
+config was too weak to overwrite the OpenCL prior — not (only) that the data was
+too small. v0 used `LR 1e-5, rank 8, num_layers 4` — low LR + tiny capacity.
+
+- **First try LR 2e-4 (20×): diverged.** Train loss 0.8 -> 6.4 by iter 20 ->
+  NaN by iter 40. Too hot for a 4-bit base with rank-16/scale-20 adapters.
+  Killed, wiped the NaN checkpoints. (Monitor grep for `nan,` caught it fast.)
+- **LR 5e-5 (5×), rank 16, num_layers 16: trained clean.** Train loss 0.5 ->
+  0.03, no NaN, peak mem 8 GB. Val bottomed iter 50 (0.586) then rose —
+  overfits faster than v0 (higher capacity), and best-val is slightly worse
+  than v0's 0.556. But val loss is the wrong metric here; idiom is the point.
+
+**Result (held-out one_shot, iter-50, vs v0):**
+
+               pass   OpenCL get_*_id   correct [[thread_position]]
+    v0          0/15        13                    0
+    v2          0/15        10                    3
+
+The hypothesis held: **higher LR + capacity moved the model measurably toward
+Metal on unseen problems** — OpenCL 13->10, and 3 kernels now use the correct
+thread-index attribute where v0 had zero. Greedy probe confirmed v0's
+`get_global_id()` is simply gone in v2; it writes device-pointer signatures now,
+just still missing `[[buffer]]`/`[[thread_position]]` bindings + syntax slips,
+so **pass stays 0/15**. The model learns the thread-index idiom faster than the
+rest of Metal's grammar.
+
+**Revised takeaway:** the v0 "no lift" was *partly a knob problem, not purely a
+data problem*. With better hyperparameters SFT demonstrably teaches the idiom
+(and it generalizes — the held-out split proves it), but 34 examples still can't
+reach a compiling kernel. Next levers: (a) few-shot the attribute syntax (likely
+closes the gap for free — the model is one grammar-fact away), (b) more data,
+(c) a warmup + mid LR to push capacity without the 2e-4 divergence. Config in
+`phase6/lora_config_v2.json`.
+
 ## 2026-07-20 (later still) — Phase 2.5: held-out test split (15 problems, leak-free eval)
 
 The Phase-6 eval's #1 carry-forward: without problems the model never trained
