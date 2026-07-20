@@ -19,7 +19,20 @@ discovery path. **Chose A**: the leak that matters is *training* on test
 problems, which happens at the SFT-export layer, not discovery — so a `split`
 field lets `export_sft.py` block it directly (filtering by spec, the source of
 truth, not by run tag). B's disk-isolation doesn't even address that leak and
-adds a second code path. Wiring: `"split": "heldout"` in the PROBLEM dict
+adds a second code path.
+
+**Why A beats B — the leak-layer principle (worth internalizing):** a held-out
+problem only leaks if it's (1) *run* -> transcript in `results/raw/`, then
+(2) *exported* into SFT. The damage happens at export (training-data assembly).
+Option B isolates only *discovery* — but `export_sft.py` globs
+`results/raw/*_repair*.json` and doesn't know or care what directory a
+transcript came from, so any held-out run that reaches `results/raw/` (via
+`--split all`, a manual run, a future both-trees scanner) gets folded straight
+into SFT. B guards the wrong door. Option A puts `split` on the spec and makes
+export drop held-out transcripts *by spec*, so the guard sits at the exact layer
+the leak passes through, and even a mis-tagged/force run can't slip past.
+General rule: **enforce isolation at the layer where the leak actually happens,
+not at an earlier convenience layer.** Wiring: `"split": "heldout"` in the PROBLEM dict
 (default "train"); `run_suite --split {train,heldout,all}` default train (so the
 60-seed behaviour is unchanged); heldout runs tagged `_heldout` so they can't
 mix into the leaderboard; `export_sft` drops heldout transcripts.
