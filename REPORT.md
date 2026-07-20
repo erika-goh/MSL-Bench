@@ -2,9 +2,11 @@
 
 *How well do LLMs write Metal compute kernels — and where do they break?*
 
-Draft dated 2026-07-03. Numbers reproducible from `results/raw/` at commit
-`7a93b0c`. Written to be readable end-to-end without deep GPU background;
-concepts introduced inline where first used.
+Draft dated 2026-07-03; §5 revised 2026-07-20 after a full repair@5 sweep
+refuted its original "repair adds nothing" claim (that finding was an
+artifact of testing only a weak model). Numbers reproducible from
+`results/raw/`. Written to be readable end-to-end without deep GPU
+background; concepts introduced inline where first used.
 
 ---
 
@@ -41,7 +43,9 @@ Four providers, one shot each, all free tier:
 - **Groq / qwen/qwen3-32b** — reasoning model, 36/60 before paused for thermal cool-down.
 - **Google / gemini-2.5-flash** — 19/36 before free tier quota killed the sweep.
 
-(Repair@5 partial data also collected for the first two; see §5.)
+(Repair@5 transcripts were later collected across all 60 problems — a
+mixed-model patchwork, gpt-oss-120b on the hard tiers — as the Phase-6
+flywheel seed set; the one_shot-vs-repair comparison is in §5.)
 
 Headline `fast_0` leaderboard, sorted by sample size:
 
@@ -217,41 +221,72 @@ Layer 3 breaks into two sub-layers:
   is not bound by that spec — it picks its own launch — and uses the
   freedom to run at ~2× the throughput.
 
-## 5. Repair@5: fixes syntax, not semantics
+## 5. Repair@5: a syntax-unsticker whose payoff is model-dependent
 
 Phase 3's second headline test: does giving the LLM its own compile
 diagnostics as feedback let it unstick past errors? Ran `repair@5`
-(up to 5 attempts per problem, feeding the failure back) on both
-providers. Both quota-died mid-sweep (Groq at 17/36, Gemini at 2/36),
-but the salvaged data is unambiguous.
+(up to 5 attempts per problem, feeding the failure back). Comparing
+one_shot vs repair fairly means counting only problems a given model
+ran in *both* modes.
 
-On the 17 problems where Groq one_shot and repair@5 both ran,
-**repair@5 added zero new correct kernels vs one_shot**. Both modes
-scored 14/17. What repair changed was the **failure mode** on two T2
-problems:
+**An earlier version of this section drew the wrong conclusion from too
+little data.** With only llama-3.3-70b's partial sweep in hand, it
+reported "repair@5 adds zero new correct kernels" and generalized that
+to "repair fixes syntax, not semantics." A later full repair sweep on a
+*stronger* model (gpt-oss-120b) refutes the generalization — while, as it
+happens, confirming the underlying mechanism. Both facts matter.
 
-    p102_row_max      one_shot: compile-fail  →  repair@5: verify-fail
-    p104_row_softmax  one_shot: compile-fail  →  repair@5: verify-fail
+**The two models, paired one_shot → repair:**
 
-The compiler diagnostics got the model past MSL syntax errors, but
-5 attempts of "wrong answer, max_abs_err=X" feedback couldn't drive
-it from "wrong numbers" to "right numbers."
+    llama-3.3-70b   T1+T2 (27 shared)   19/27 → 19/27   (+0)
+    gpt-oss-120b    T3+T4 (19 shared)    3/19 → 16/19   (+13)
+                    of which T3 (15):     3/15 → 13/15   (+10)
 
-Mapped onto the layered analysis of §4, this is what we'd predict:
+So repair@5's payoff is not a constant — it ranges from *nothing* to
+*recovering most of the tiled-kernel cliff*, depending on the model.
+
+**What repair actually fixes (the mechanism holds).** Of gpt-oss's 10
+new T3 wins, **9 were one_shot compile-fails and 1 was a verify-fail**:
+
+    p201, p205, p206, p209, p210, p211, p212, p215, p204   compile → PASS
+    p208_conv2d_5x5_tiled                                   verify  → PASS
+
+Repair is overwhelmingly a **syntax-unsticker**: the compiler *tells* the
+model what's wrong and a capable model acts on it. It almost never drove
+a kernel from "wrong numbers" to "right numbers" (1 of 10). The old
+llama-only observation — compile-fail → verify-fail mode-shifts with no
+new passes (`p102_row_max`, `p104_row_softmax`) — was the *same mechanism*
+seen through a model too weak to finish the fix.
+
+**Why the payoff differs so wildly.** Repair@5's lift ≈ (how many of a
+model's one_shot failures are fixable *syntax* errors) × (whether the
+model can act on the diagnostic). gpt-oss cliffs on T3 by writing MSL
+that doesn't *compile* — highly fixable, and it fixes them. llama's
+failures are either unfixable-by-it or already past the compiler into
+wrong-semantics territory, where the scalar-error signal isn't pointed
+enough. Same repair loop, opposite outcomes.
+
+Mapped onto the layered analysis of §4:
 
 - **Layer 1 errors** (compile fails from wrong syntax): the compiler
-  *tells* the model what's wrong. Repair fixes these.
-- **Layer 2 errors** (verify fails from wrong idioms): the compiler is
-  silent, code runs, semantics are wrong. Scalar-error feedback isn't
-  pointed enough to fix the specific line.
+  *tells* the model what's wrong. Repair fixes these — *if the model is
+  strong enough to act on the message.* This is where the entire +13
+  came from.
+- **Layer 2 errors** (verify fails from wrong idioms): compiler silent,
+  code runs, semantics wrong. Scalar-error feedback fixed exactly 1.
 - **Layer 3 errors** (slow but correct): invisible to compile and verify
   signals both. Would require performance feedback.
 
-**Concrete implication for Phase 5 / Phase 6:** the ceiling of
-repair@5 with only compile + scalar-correctness signal is "unstick
-layer-1 errors." Anything past that needs a richer feedback surface —
-per-element diff previews, shape-mismatch hints, or performance-vs-
-reference signals.
+**Concrete implication for Phase 5 / Phase 6:** repair@5 with only
+compile + scalar-correctness signal is a **layer-1 unsticker, and a
+strong one** — for a capable model it recovers most of the T3 cliff for
+free. It is *not* a floor-raiser: it does nothing for a model that can't
+act on its own errors, and it barely touches layer-2 semantics for
+anyone. Pushing past that needs a richer feedback surface — per-element
+diff previews, shape-mismatch hints, or performance-vs-reference signals.
+The repair transcripts collected here (38 converged transcripts, 15 of
+them success-after-repair, plus 23 labeled negatives) are the Phase-6 SFT
+seed set built on exactly this signal.
 
 ## 6. Benchmark-design caveat: the spec-launch cap
 
@@ -289,15 +324,19 @@ and should be a deliberate decision before Phase 5's public demo.
 
 | Failure class | Example | Fixable by repair@5? | Fixable by better design under spec? |
 |---------------|---------|----------------------|--------------------------------------|
-| Compile error (layer 1) | `mem_device` flag / wrong keyword | **Yes** — compiler tells you what's wrong | n/a |
-| Verify error (layer 2) | Wrong reduction pattern, off-by-one tile bound | No — scalar error not pointed | Yes, given right feedback |
+| Compile error (layer 1) | `mem_device` flag / wrong keyword | **Yes, if the model can act on it** — drove gpt-oss's entire +10 on T3; nothing for llama | n/a |
+| Verify error (layer 2) | Wrong reduction pattern, off-by-one tile bound | Rarely — scalar error not pointed (1 of 10 fixes) | Yes, given right feedback |
 | Slow correct (layer 3a) | Missing SIMD-group reductions, no fusion | No — no perf feedback in loop | Yes |
 | Slow correct (layer 3b) | Spec's launch forbids MPS-shape design | No | **No** — benchmark artifact |
 
 ## 8. What's next
 
-- **Phase 5** (web demo) and **Phase 6** (data flywheel in a separate
-  repo) — the natural next work. Both explicitly future.
+- **Phase 5** (web demo) is underway — the leaderboard now carries the
+  repair@5 runs and a one_shot-vs-repair lift chart (§5). **Phase 6**
+  (data flywheel, separate repo) has its seed set: repair transcripts for
+  all 60 problems, exported to SFT-ready JSONL (38 converged, 15
+  success-after-repair). The fine-tune + re-benchmark loop is the next
+  real work.
 - **Broaden the model roster.** Only two providers ran full one_shot;
   add Claude, o1, GPT-4, Gemini Pro when budget permits. Ollama sweep
   pending (needs thermal-safety greenlight for the local machine).
