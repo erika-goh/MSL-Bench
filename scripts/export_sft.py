@@ -49,10 +49,33 @@ def _first_user_idx(msgs: list[dict]) -> int:
     return next(i for i, m in enumerate(msgs) if m["role"] == "user")
 
 
+def _heldout_pids() -> set[str]:
+    """Problem ids marked split=heldout in their spec — the Phase-2.5 test set.
+
+    These must NEVER become training data, or the held-out eval is meaningless.
+    We filter by the spec (source of truth), not by run tag, so a mis-tagged run
+    still can't leak a test problem into SFT.
+    """
+    from mkb import problems as P
+    out = set()
+    for sp in P.discover():
+        prob, _ = P.load(sp)
+        if prob.get("split", "train") == "heldout":
+            out.add(prob["id"])
+    return out
+
+
 def main() -> None:
     records = [json.loads(f.read_text()) for f in sorted(RAW.glob("*_repair*__*.json"))]
     if not records:
         raise SystemExit("no repair records in results/raw/; run run_suite.py --mode repair first")
+
+    heldout = _heldout_pids()
+    dropped = [r["problem"] for r in records if r["problem"] in heldout]
+    records = [r for r in records if r["problem"] not in heldout]
+    if dropped:
+        print(f"excluded {len(dropped)} held-out transcript(s) from SFT: "
+              f"{sorted(set(dropped))}")
 
     OUT.mkdir(parents=True, exist_ok=True)
     write_rows, repair_rows, failed_rows = [], [], []

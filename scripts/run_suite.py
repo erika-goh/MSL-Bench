@@ -91,6 +91,9 @@ def main() -> None:
     ap.add_argument("--mode", choices=["one_shot", "repair"], default="one_shot")
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--tier", type=int, default=None, help="restrict to one tier")
+    ap.add_argument("--split", choices=["train", "heldout", "all"], default="train",
+                    help="which split to run; seeds are 'train', Phase-2.5 test "
+                         "problems are 'heldout'. Default keeps the 60-seed suite.")
     ap.add_argument("--only", default=None,
                     help="comma-separated problem ids to include (e.g. p001_vector_add,p013_gelu)")
     ap.add_argument("--sleep", type=float, default=2.0,
@@ -106,10 +109,15 @@ def main() -> None:
     # earlier records and both budgets end up as separate leaderboard rows.
     if args.max_tokens != 4096:
         run_tag += f"_mt{args.max_tokens}"
+    # Held-out results must never mix into the seed leaderboard, so tag them.
+    if args.split == "heldout":
+        run_tag += "_heldout"
 
     records = []
     for spec_path in P.discover():
         problem, reference = P.load(spec_path)
+        if args.split != "all" and problem.get("split", "train") != args.split:
+            continue
         if args.tier and problem["tier"] != args.tier:
             continue
         pid = problem["id"]
