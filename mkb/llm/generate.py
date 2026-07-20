@@ -105,7 +105,18 @@ def repair_k(provider: str, problem: dict, feedback_fn, k: int = 5, model: str |
     messages = build_prompt(problem)
     kernel = None
     for attempt in range(1, k + 1):
-        raw = providers.complete(provider, messages, model, max_tokens=max_tokens)
+        try:
+            raw = providers.complete(provider, messages, model, max_tokens=max_tokens)
+        except Exception as e:
+            # Provider error mid-loop (e.g. Groq TPM 413 once the transcript has
+            # grown past the per-minute cap). Preserve the attempts collected so
+            # far — a partial fail->feedback->retry trajectory is still a valid
+            # flywheel seed. Never let the error discard it (the codebase's
+            # "never throw transcripts away" rule). Record it so callers can tell
+            # a provider abort from an honest repair@k exhaustion.
+            messages.append({"role": "error", "content": f"{type(e).__name__}: {str(e)[:300]}"})
+            return {"mode": f"repair@{k}", "attempts": attempt - 1, "kernel": kernel,
+                    "success": False, "transcript": messages, "provider_error": str(e)[:300]}
         messages.append({"role": "assistant", "content": raw})
         kernel = extract_metal(raw)
         if kernel is None:

@@ -5,6 +5,122 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-19 — repair@5 flywheel completed: 60/60 seed transcripts, three quota walls, one harness fix
+
+Closed Phase 3: every one of the 60 problems now has a real repair@5
+transcript in `results/raw/`. These transcripts are the flywheel's seed
+trajectories (repair transcripts -> SFT -> re-benchmark, Phase 6). Getting
+there meant fighting Groq/Gemini free-tier quotas the whole way, and the
+*mechanisms* of those walls are the real lesson.
+
+### The dataset (best seed per problem)
+
+    T1: 15/15 correct   T2: 5/15   T3: 13/15   T4: 4/15
+    15 success-after-repair seeds (passed on attempt > 1) — highest value
+    17 full 5-attempt fail chains (rich fail->feedback->fail seeds)
+
+**Provenance is mixed and that's deliberate** — no single free model could
+finish all 60 in one night, so the best-seed set is a patchwork, traceable
+per-record via the `run` tag:
+- llama-3.3-70b: T1 + T2 (small specs, its TPD covered them)
+- gpt-oss-120b: T3 + T4 p301–p304 (the strong model, best T3 seeds)
+- llama-3.1-8b: T4 p305–p315 (fallback once the strong models walled)
+- gemini-2.5-flash: 1 leftover
+
+Caveat for any future report: **the per-tier pass rates above are NOT one
+model's difficulty curve** — they mix three models. T3 13/15 is gpt-oss;
+T2 5/15 is llama-3.3-70b. Don't read them as a single-model cliff.
+
+### Three distinct quota walls (they are not the same thing)
+
+1. **TPD — tokens per day, per model.** Hit twice: llama-3.3-70b (100k/day,
+   died at T1+T2) and gpt-oss-120b (200k/day, died mid-T4 at p305). Each
+   model has its *own* daily bucket, so switching models buys a fresh one —
+   that's why the pivot to gpt-oss worked at all. Resets ~24h; no way around
+   it tonight except changing model.
+
+2. **TPM — tokens per minute — inflated by a reasoning reservation.**
+   gpt-oss-120b free tier caps at 8k TPM, but a request with a 560-token
+   prompt was billed as **11,733**. The gap is the completion *reservation*:
+   Groq counts `max_tokens` (4096) AND, for a reasoning model, a large
+   reasoning budget (~7k) against the per-minute limit — not actual tokens
+   used. Concept worth internalizing: **on Groq, request size for
+   rate-limiting = prompt + max_tokens + (reasoning reservation), so
+   lowering `max_tokens` directly shrinks the billed request.** Measured:
+   mt=4096 -> 413 (too large); mt=3000 -> fits AND emits code; mt=1500 ->
+   fits but reasoning eats it all, zero code out. mt=3000 was the sweet spot.
+
+3. **Same TPM wall on a non-reasoning model.** llama-3.1-8b (~6k TPM) 413'd
+   on repair *attempt 2* at mt=4096 — no reasoning reservation, just the
+   4096 completion reservation plus a grown transcript. Dropping to mt=2000
+   bought 2–5 real attempts per problem before the growing history crossed
+   the cap. (An 8B model only emits ~500 tokens of kernel anyway, so mt=2000
+   costs nothing in code quality.)
+
+Takeaway: **repair@k is quadratic-ish in tokens** — each attempt resends the
+whole growing transcript — so it collides with per-minute caps far sooner
+than one-shot does. Budget `max_tokens` against the TPM cap, not against
+"how long might the answer be."
+
+### Harness fix: never throw a partial repair transcript away
+
+`repair_k` used to let a provider error propagate mid-loop. `run_suite`'s
+outer handler then saw `gen is None` and saved *only the error* — discarding
+every attempt we'd already paid for. Root cause: the transcript lived inside
+`repair_k`'s local `messages`, unreachable once the exception escaped.
+
+Fix (mkb/llm/generate.py): wrap the `providers.complete` call inside the
+loop; on exception, append an error marker and **return the partial
+transcript** with `success=False`, `attempts=attempt-1`, and a
+`provider_error` field. Now a TPM 413 on attempt 5 keeps attempts 1–4 as
+seed data. Validated live on p202 (kept 4 attempts) and p304 (kept 4). This
+is the same "never throw transcripts away" rule the run_suite except-block
+already followed — the gap was just that repair_k didn't return its own
+partial when the provider call itself threw.
+
+Minor cost: a genuine daily-quota exhaustion is now recorded as a per-problem
+partial-fail instead of loudly stopping the sweep. The `provider_error`
+field + `role:"error"` transcript entry keep it distinguishable, so
+leaderboard code can still filter provider aborts from honest repair@k
+exhaustion.
+
+### Finding: repair@5 closes the T3 cliff for a strong model
+
+The Phase-4 story was "LLMs cliff-dive from T1 to T2 and stay down." Repair
+data complicates that in a good way:
+- gpt-oss-120b one_shot T3 was ~20% correct; **repair@5 got 13/15.** The
+  fail->feedback->retry loop recovers most of the T3 (tiled) cliff *if the
+  model is strong enough to act on the feedback.*
+- llama-3.3-70b was 0/8 on T3 (one_shot and repair alike) — it can't use
+  the feedback, so repair doesn't help. This is exactly why gpt-oss's
+  verify-fails were predicted (07-03 notes) to be higher-value seeds.
+- T4 (fused) stays hard even with repair + a strong model: best is 4/15.
+  Fused kernels (attention, layernorm, swiglu) are where repair@5 still
+  can't rescue the answer.
+
+So the sharper claim for the report: **repair recovers the tiled tier for
+capable models but not the fused tier — the real, repair-resistant wall is
+T4, not T2.**
+
+### Caveat logged: don't headline the T3 conv speedups
+
+p213 conv1d "27×" and p214 conv2d_stride2 "41×" are the
+wall-clock-vs-GPU-clock artifact already documented at the bottom of this
+file: `reference_ms` is CPU wall-clock (includes MPS dispatch + Python
+overhead), `kernel_ms` is pure GPU. Conv on small tensors is exactly where
+MPS per-dispatch overhead dominates, so the ratio flatters the kernel.
+Correctness is real (passed verify at the problem's tolerance); the *speed*
+number is not a real 40×. Re-verify with reverify.py before ever quoting it.
+
+### Open items
+
+- Single-model repair completeness (one model across all 60) still blocked
+  on TPD resets; llama-3.3-70b could finish its own T3/T4 tomorrow. Only
+  matters if we want a clean single-model repair curve for the report.
+- A paid Groq Dev tier removes the 8k TPM cap and would let gpt-oss-120b do
+  the full 60 in one pass — worth it if the flywheel needs strong-model
+  seeds on every problem rather than the current patchwork.
+
 ## 2026-07-09 (later) — why tiers exist: MSL-knowledge calibration, not just difficulty
 
 Recording this for the report because "why is the suite tiered" is the
