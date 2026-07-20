@@ -5,6 +5,65 @@ go on top. Concept explanations and lessons (not just changelog) are the point.
 
 ---
 
+## 2026-07-20 (later) — Phase 6 first fine-tune: MLX-LM LoRA runs, two bugs, a thermal lesson
+
+First local fine-tune actually trained. Base `Qwen2.5-Coder-7B-Instruct-4bit`,
+LoRA via MLX-LM, on the 34-example `sft_write` set (+4 valid). Recipe now lives
+in `phase6/lora_config.json`.
+
+### Bug 1: `iters` self-clobbered to 1 (silent no-op run)
+
+Smoke-tested with `--iters 1`. MLX-LM **saves the resolved run config back into
+`adapter_path` at the end of training** — which was the exact same file I passed
+to `--config` (`phase6/adapters/adapter_config.json`, since the recipe lived
+inside the output dir). So the smoke run overwrote `iters: 100 -> 1`, and every
+later run read the clobbered file and re-saved `1`. Two "full" runs were silent
+1-iter no-ops before I caught `Starting training..., iters: 1` in the log.
+**Fix:** move the source recipe OUT of `adapter_path` (`phase6/lora_config.json`),
+so the trainer's output-dir writes can't touch it. General rule: never point
+`--config` at a file that lives in a dir the tool writes to.
+
+### Bug 2 / the real lesson: a 1-iter probe does NOT predict sustained load
+
+Told the user the run would be "light" based on smoke numbers (13.5 GB peak,
+0.88 it/s). Wrong. The real run's memory GREW as it hit longer examples:
+iter 10 -> 18.4 GB, iter 20 -> 22.8 GB (71% of 32 GB), it/sec collapsed ~9x
+under memory pressure. User physically felt the machine heat up; killed it.
+Same shape as the Groq "false green light" lesson above — **a single probe
+tells you almost nothing about sustained behavior.** Watch the *trend* (peak-mem
+per report), not the first data point.
+
+Why it ballooned + how the lighter config fixed it (peak 22.8 -> 7.5 GB):
+the big variable memory is **stored activations** kept for the backward pass,
+scaling ~ batch x seq_len x model-layers.
+- `grad_checkpoint: true` = biggest lever. Stops storing most activations,
+  recomputes them in backprop instead (trade compute for memory). This alone
+  did most of the 3x drop.
+- `batch_size 2->1`, `max_seq_length 3072->2048` = linear cuts to the same pile.
+  (2048 chosen deliberately: max example ~1995 tok, so no truncation. 1024 would
+  have truncated 6/38 targets = broken kernels.)
+- `num_layers 8->4` = the trap: in MLX-LM this is *how many layers get a LoRA
+  adapter*, NOT model size. Base still runs its full forward pass, so this barely
+  touched memory — it only shrank the (tiny, 5.767M-param) trainable set.
+
+### Result: overfitting U-curve -> use the iter-50 checkpoint, not the final
+
+Val loss: 0.767 (1) -> 0.593 (25) -> **0.556 (50)** -> 0.593 (75) -> 0.637 (100).
+Train loss kept dropping (0.8 -> 0.33); classic memorization of 34 examples.
+Default `adapters.safetensors` = iter-100 (the WORSE one). `save_every: 25` left
+us `0000050_adapters.safetensors` as the best-generalizing checkpoint.
+**Benchmark that one.** (This is why 34 examples is a proof-of-concept, not a
+model — expected per the phase-6 plan.)
+
+### Carry-forward
+
+- Next step is fuse(iter-50) -> serve -> re-benchmark. **The benchmark is the
+  next heat session** (60 problems of inference > the training we just did),
+  so plan it: probe one tier (T2, where idiom uptake should show), check temps,
+  then decide on the full suite. Confirm before launching per thermal rule.
+- Honest-eval framing still holds: report failure-mode shift + T2/T3 tier gains
+  (idiom uptake), NOT headline accuracy (same-suite seeds = partial memorization).
+
 ## 2026-07-20 — Groq TPD is a rolling window; demo gets a repair-lift chart
 
 ### Lesson: a single successful request does NOT prove a quota reset
